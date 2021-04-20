@@ -71,6 +71,7 @@ interface
   {$HPPEMIT '#pragma comment(lib, "VirtualTreesR")'}
 {$endif}
 {$HPPEMIT '#pragma comment(lib, "Shell32")'}
+{$HPPEMIT '#pragma comment(lib, "uxtheme")'}
 {$HPPEMIT '#pragma link "VirtualTrees.Accessibility"'}
 
 uses
@@ -86,7 +87,7 @@ type
 {$ENDIF}
 
 const
-  VTVersion = '7.4.0' deprecated 'This const is going to be removed in a future version';
+  VTVersion = '7.5.0' deprecated 'This const is going to be removed in a future version';
 
 const
   VTTreeStreamVersion = 3;
@@ -1349,7 +1350,7 @@ type
     procedure AutoScale(); virtual;
     function CanSplitterResize(P: TPoint): Boolean;
     function CanWriteColumns: Boolean; virtual;
-    procedure ChangeScale(M, D: TDimension); virtual;
+    procedure ChangeScale(M, D: TDimension; isDpiChange: Boolean); virtual;
     function DetermineSplitterIndex(P: TPoint): Boolean; virtual;
     procedure DoAfterAutoFitColumn(Column: TColumnIndex); virtual;
     procedure DoAfterColumnWidthTracking(Column: TColumnIndex); virtual;
@@ -2399,6 +2400,7 @@ type
     function GetVisible(Node: PVirtualNode): Boolean;
     function GetVisiblePath(Node: PVirtualNode): Boolean;
     function HandleDrawSelection(X, Y: Integer): Boolean;
+    procedure HandleCheckboxClick(pHitNode: PVirtualNode; pKeys: LongInt);
     function HasVisibleNextSibling(Node: PVirtualNode): Boolean;
     function HasVisiblePreviousSibling(Node: PVirtualNode): Boolean;
     procedure ImageListChange(Sender: TObject);
@@ -4062,7 +4064,7 @@ const
 
   // Do not modify the copyright in any way! Usage of this unit is prohibited without the copyright notice
   // in the compiled binary file.
-  Copyright: string = 'Virtual Treeview © 1999, 2010, 2016 Mike Lischke, Joachim Marder';
+  Copyright: string = 'Virtual Treeview © 1999-2021 Mike Lischke, Joachim Marder';
 
 var
   StandardOLEFormat: TFormatEtc = (
@@ -9653,11 +9655,12 @@ var
 begin
   if toAutoChangeScale in Treeview.TreeOptions.AutoOptions then
   begin
-    // Find the largest Columns[].Spacing
+    // Ensure a minimum header size based on the font, so that all text is visible.
+    // First find the largest Columns[].Spacing
     lMaxHeight := 0;
     for I := 0 to Self.Columns.Count - 1 do
       lMaxHeight := Max(lMaxHeight, Columns[I].Spacing);
-    // Calculate the required size based on the font, this is important as the use migth just vave increased the size of the icon font
+    // Calculate the required height based on the font, this is important as the user might just have increased the size of the system icon font.
     with TBitmap.Create do
       try
         Canvas.Font.Assign(FFont);
@@ -9665,7 +9668,7 @@ begin
       finally
         Free;
       end;
-    // Get the maximum of the scaled original value an
+    // Get the maximum of the scaled original value and the minimum needed header height.
     lMaxHeight := Max(lMaxHeight, FHeight);
     // Set the calculated size
     Self.SetHeight(lMaxHeight);
@@ -9983,11 +9986,13 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-procedure TVTHeader.ChangeScale(M, D: Integer);
+procedure TVTHeader.ChangeScale(M, D: Integer; isDpiChange: Boolean);
 var
   I: Integer;
 begin
   // This method is only executed if toAutoChangeScale is set
+  FMinHeight := MulDiv(FMinHeight, M, D);
+  FMaxHeight := MulDiv(FMaxHeight, M, D);
   Self.Height := MulDiv(FHeight, M, D);
   if not ParentFont then
     Font.Height := MulDiv(Font.Height, M, D);
@@ -9996,7 +10001,8 @@ begin
   begin
     Self.FColumns[I].Width := MulDiv(Self.FColumns[I].Width, M, D);
   end;//for I
-  AutoScale();
+  if not isDpiChange then
+    AutoScale();
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -12173,6 +12179,11 @@ begin
   FClipboardFormats := TClipboardFormats.Create(Self);
   FOptions := GetOptionsClass.Create(Self);
 
+  Touch.InteractiveGestures := [igPan, igPressAndTap];
+  Touch.InteractiveGestureOptions := [igoPanInertia,
+    igoPanSingleFingerHorizontal, igoPanSingleFingerVertical,
+    igoPanGutter, igoParentPassthrough];
+
   if not (csDesigning in ComponentState) then //Don't create worker thread in IDE, there is no use for it
     TWorkerThread.AddThreadReference();
 end;
@@ -14067,14 +14078,19 @@ var
 
   //--------------- end local function ----------------------------------------
 
+const
+  cMinExpandoHeight = 11; // pixels @100%
 begin
   if VclStyleEnabled and (seClient in StyleElements) then
   begin
     if NeedButtons then begin
       if StyleServices.GetElementSize(FPlusBM.Canvas.Handle, StyleServices.GetElementDetails(tcbCategoryGlyphClosed), TElementSize.esActual, Size) then
+      begin
+        Size.cx := Max(Size.cx, cMinExpandoHeight); // Use min size of 11, see issue #1035 / RSP-33715
         Size.cx := ScaledPixels(Size.cx) // I would have expected that the returned value is dpi-sclaed, but this is not the case in RAD Studio 10.4.1. See issue #984
+      end
       else
-        Size.cx := ScaledPixels(11);
+        Size.cx := ScaledPixels(cMinExpandoHeight);
       Size.cy := Size.cx;
       FillBitmap(FPlusBM);
       FillBitmap(FHotPlusBM);
@@ -18497,7 +18513,7 @@ begin
       else
         Flags := DefaultScalingFlags; // Important for #677
       if (sfHeight in Flags) then begin
-        FHeader.ChangeScale(M, D);
+        FHeader.ChangeScale(M, D, {$if CompilerVersion >= 31}isDpiChange{$ELSE} M <> D{$ifend});
         SetDefaultNodeHeight(MulDiv(FDefaultNodeHeight, M, D));
         Indent := MulDiv(Indent, M, D);
         FTextMargin := MulDiv(FTextMargin, M, D);
@@ -22394,7 +22410,6 @@ end;
 procedure TBaseVirtualTree.HandleMouseDblClick(var Message: TWMMouse; const HitInfo: THitInfo);
 
 var
-  NewCheckState: TCheckState;
   Node: PVirtualNode;
   MayEdit: Boolean;
 
@@ -22437,12 +22452,8 @@ begin
     else
       if hiOnItemCheckBox in HitInfo.HitPositions then
       begin
-        NewCheckState := DetermineNextCheckState(HitInfo.HitNode.CheckType, HitInfo.HitNode.CheckState);
-        if (ssLeft in KeysToShiftState(Message.Keys)) and DoChecking(HitInfo.HitNode, NewCheckState) then
-        begin
-          SetCheckStateForAll(NewCheckState, True);
-          MayEdit := False;
-        end;
+        HandleCheckboxClick(HitInfo.HitNode, Message.Keys);
+        MayEdit := False;
       end// if hiOnItemCheckBox
       else
       begin
@@ -22477,6 +22488,22 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
+procedure TBaseVirtualTree.HandleCheckboxClick(pHitNode: PVirtualNode; pKeys: LongInt);
+var
+  NewCheckState: TCheckState;
+begin
+    NewCheckState := DetermineNextCheckState(pHitNode.CheckType, pHitNode.CheckState);
+    if (ssLeft in KeysToShiftState(pKeys)) and DoChecking(pHitNode, NewCheckState) then
+    begin
+      if (Self.SelectedCount > 1) and (Selected[pHitNode]) and not (toSyncCheckboxesWithSelection in TreeOptions.SelectionOptions) then
+        SetCheckStateForAll(NewCheckState, True)
+      else
+        DoCheckClick(pHitNode, NewCheckState);
+    end;//if ssLeft
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
 procedure TBaseVirtualTree.HandleMouseDown(var Message: TWMMouse; var HitInfo: THitInfo);
 
 // centralized mouse button down handling
@@ -22499,7 +22526,6 @@ var
   NewNode: Boolean;      // Node changed.
   NeedChangeEvent: Boolean;   // change event is required for selection change
   CanClear: Boolean;
-  NewCheckState: TCheckState;
   AltPressed: Boolean;   // Pressing the Alt key enables special processing for selection.
   FullRowDrag: Boolean;  // Start dragging anywhere within a node's bound.
   NodeRect: TRect;
@@ -22678,14 +22704,7 @@ begin
   // check event
   if hiOnItemCheckBox in HitInfo.HitPositions then
   begin
-    NewCheckState := DetermineNextCheckState(HitInfo.HitNode.CheckType, HitInfo.HitNode.CheckState);
-    if (ssLeft in KeysToShiftState(Message.Keys)) and DoChecking(HitInfo.HitNode, NewCheckState) then
-    begin
-      if (Self.SelectedCount > 1) and (Selected[HitInfo.HitNode]) and not (toSyncCheckboxesWithSelection in TreeOptions.SelectionOptions) then
-        SetCheckStateForAll(NewCheckState, True)
-      else
-        DoCheckClick(HitInfo.HitNode, NewCheckState);
-    end;//if ssLeft
+    HandleCheckboxClick(HitInfo.HitNode, Message.Keys);
     Exit;
   end;
 
@@ -32673,7 +32692,7 @@ begin
       ScrollInfo.nPage := Max(0, ClientWidth + 1);
 
       ScrollInfo.fMask := SIF_ALL or ScrollMasks[FScrollBarOptions.AlwaysVisible];
-      SetScrollInfo(Handle, SB_HORZ, ScrollInfo, DoRepaint);
+      SetScrollInfo(Handle, SB_HORZ, ScrollInfo, DoRepaint); // 1 app freeze seen here in TreeSize 8.1.0 after ScaleForPpi()
       if DoRepaint then
         RedrawWindow(Handle, nil, 0, RDW_FRAME or RDW_INVALIDATE); // Fixes issue #698
     end
@@ -34625,7 +34644,7 @@ begin
     end;
     if Self.SelectedCount = 1 then
       FPreviouslySelected.Clear();
-    Self.OnGetText(Self, Node, 0, ttNormal, lSelectedNodeCaption);
+    Self.OnGetText(Self, Node, Header.RestoreSelectionColumnIndex, ttNormal, lSelectedNodeCaption);
     FPreviouslySelected.Add(lSelectedNodeCaption);
   end;//if
 end;
@@ -34644,7 +34663,7 @@ begin
       FPreviouslySelected.Clear()
     else
     begin
-      Self.OnGetText(Self, Node, 0, ttNormal, lSelectedNodeCaption);
+      Self.OnGetText(Self, Node, Header.RestoreSelectionColumnIndex, ttNormal, lSelectedNodeCaption);
       if FPreviouslySelected.Find(lSelectedNodeCaption, lIndex) then
         FPreviouslySelected.Delete(lIndex);
     end;//else
