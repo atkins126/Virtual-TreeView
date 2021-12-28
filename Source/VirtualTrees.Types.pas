@@ -105,10 +105,10 @@ const
   hcTFCannotSetUserData  = 2008;
 
   // Header standard split cursor.
-  crHeaderSplit          = TCursor(63);
+  crHeaderSplit          = crHSplit deprecated 'Use vrHSplit instead';
 
   // Height changing cursor.
-  crVertSplit            = TCursor(62);
+  crVertSplit            = crVSplit deprecated 'Use vrVSplit instead';
 
 
 type
@@ -441,7 +441,7 @@ type
     property SelectionOptions : TVTSelectionOptions read FSelectionOptions write SetSelectionOptions default DefaultSelectionOptions;
     property EditOptions : TVTEditOptions read FEditOptions write FEditOptions default toDefaultEdit;
 
-    //property Owner: TBaseVirtualTree read FOwner;
+    property Owner: TCustomControl read FOwner;
   end;
 
   TTreeOptionsClass = class of TCustomVirtualTreeOptions;

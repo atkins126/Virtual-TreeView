@@ -3032,11 +3032,6 @@ begin
   // Register the tree reference clipboard format. Others will be handled in InternalClipboarFormats.
   CF_VTREFERENCE := RegisterClipboardFormat(CFSTR_VTREFERENCE);
 
-  // Delphi (at least version 6 and lower) does not provide a standard split cursor.
-  // Hence we have to load our own.
-  Screen.Cursors[crHeaderSplit] := LoadCursor(HInstance, 'VT_HEADERSPLIT');
-  Screen.Cursors[crVertSplit] := LoadCursor(HInstance, 'VT_VERTSPLIT');
-
   // Clipboard format registration.
   // Native clipboard format. Needs a new identifier and has an average priority to allow other formats to take over.
   // This format is supposed to use the IStream storage format but unfortunately this does not work when
@@ -9416,7 +9411,7 @@ begin
                   Node := HitInfo.HitNode;
 
                 if CanSplitterResizeNode(P, Node, HitInfo.HitColumn) then
-                  NewCursor := crVertSplit;
+                  NewCursor := crVSplit;
               end;
             end;
 
@@ -13920,7 +13915,7 @@ begin
           FSearchBuffer := NewSearchText;
           FLastSearchNode := Run;
           FocusedNode := Run;
-          Selected[Run] := True;
+          AddToSelection(Run, False);
           FLastSearchNode := Run;
         end
         else
@@ -23313,6 +23308,7 @@ var
   Run: PVirtualNode;
   UseColumns,
   HScrollBarVisible: Boolean;
+  OldOffsetY: Integer;
   ScrolledVertically,
   ScrolledHorizontally: Boolean;
 
@@ -23338,13 +23334,13 @@ begin
 
     // The returned rectangle can never be empty after the expand code above.
     // 1) scroll vertically
+    OldOffsetY := FOffsetY;
     if R.Top < 0 then
     begin
       if Center then
         SetOffsetY(FOffsetY - R.Top + ClientHeight div 2)
       else
         SetOffsetY(FOffsetY - R.Top);
-      ScrolledVertically := True;
     end
     else
       if (R.Bottom > ClientHeight) or Center then
@@ -23360,8 +23356,8 @@ begin
         // in order to avoid that the scroll bar hides the node which we wanted to have in view.
         if not UseColumns and not HScrollBarVisible and (Integer(FRangeX) > ClientWidth) then
           SetOffsetY(FOffsetY - GetSystemMetrics(SM_CYHSCROLL));
-        ScrolledVertically := True;
       end;
+    ScrolledVertically := OldOffsetY <> FOffsetY;
 
     if Horizontally then
       // 2) scroll horizontally
@@ -23389,7 +23385,8 @@ function TBaseVirtualTree.ScrollIntoView(Column: TColumnIndex; Center: Boolean; 
 var
   ColumnLeft,
   ColumnRight: Integer;
-  NewOffset: Integer;
+  NewOffset,
+  OldOffset: Integer;
   R: TRect;
 
 begin
@@ -23406,6 +23403,7 @@ begin
   end else
     Exit;
 
+  OldOffset := FOffsetX;
   NewOffset := FEffectiveOffsetX;
   if not (FHeader.UseColumns and (coFixed in Header.Columns[Column].Options)) and (not Center) then
   begin
@@ -23421,7 +23419,6 @@ begin
       else
         SetOffsetX(-NewOffset);
     end;
-    Result := True;
   end
   else if Center then
   begin
@@ -23433,8 +23430,8 @@ begin
       else
         SetOffsetX(-NewOffset);
     end;
-    Result := True;
-  end
+  end;
+  Result := OldOffset <> FOffsetX;
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -24624,7 +24621,7 @@ begin
         else
           if vsSelected in Node.States then
           begin
-            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused);
+            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused or (toPopupMode in FOptions.PaintOptions));
           end;
       end;
     end;
@@ -24736,7 +24733,7 @@ begin
       if Node = FDropTargetNode then
       begin
         if (FLastDropMode = dmOnNode) or (vsSelected in Node.States) then
-          Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused)
+          Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused or (toPopupMode in FOptions.PaintOptions))
         else
           Canvas.Font.Color := FColors.NodeFontColor;
       end
@@ -24744,7 +24741,7 @@ begin
         if vsSelected in Node.States then
         begin
           if Focused or (toPopupMode in FOptions.PaintOptions) then
-            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused)
+            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused or (toPopupMode in FOptions.PaintOptions))
           else
             Canvas.Font.Color := FColors.NodeFontColor;
         end;
@@ -25918,3 +25915,4 @@ finalization
   FinalizeGlobalStructures();
 
 end.
+
