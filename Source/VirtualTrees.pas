@@ -14092,8 +14092,6 @@ var
   //--------------- end local functions ---------------------------------------
 
 begin
-  if IsEmpty then
-    Exit; // Nothing to do
   if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
   begin
     StopWheelPanning;
@@ -14121,6 +14119,9 @@ begin
     // Repeat the hit test as an OnExit event might got triggered that could modify the tree.
     GetHitTestInfoAt(Message.XPos, Message.YPos, True, HitInfo);
   end;
+
+  if IsEmpty then
+    Exit; // Nothing to do
 
   // Keep clicked column in case the application needs it.
   FHeader.Columns.ClickIndex := HitInfo.HitColumn;
@@ -14167,7 +14168,7 @@ begin
   IsLabelHit := not AltPressed and not (toSimpleDrawSelection in FOptions.SelectionOptions) and
     ((hiOnItemLabel in HitInfo.HitPositions) or (hiOnNormalIcon in HitInfo.HitPositions));
 
-  IsCellHit := not AltPressed and not IsLabelHit and Assigned(HitInfo.HitNode) and
+  IsCellHit := not IsLabelHit and Assigned(HitInfo.HitNode) and
     ([hiOnItemButton, hiOnItemCheckBox, hiNoWhere] * HitInfo.HitPositions = []) and
     ((toFullRowSelect in FOptions.SelectionOptions) or
     ((toGridExtensions in FOptions.MiscOptions) and (HitInfo.HitColumn > NoColumn)));
@@ -17301,7 +17302,7 @@ procedure TBaseVirtualTree.VclStyleChanged();
   // Updates the member FVclStyleEnabled, should be called initially and when the VCL style changes
 
 begin
-  FVclStyleEnabled := StyleServices.Enabled and not StyleServices.IsSystemStyle and not (csDesigning in ComponentState);
+  FVclStyleEnabled := StyleServices.Enabled and not StyleServices.IsSystemStyle {$IF CompilerVersion < 35} and not (csDesigning in ComponentState) {$ifend};
   Header.StyleChanged();
 end;
 
@@ -24616,7 +24617,7 @@ begin
         if Node = FDropTargetNode then
         begin
           if ((FLastDropMode = dmOnNode) or (vsSelected in Node.States)) then
-            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(Focused or (toPopupMode in FOptions.PaintOptions));
+            Canvas.Font.Color := FColors.GetSelectedNodeFontColor(True); // See #1083, since drop highlight color is chosen independent of the focus state, we need to choose Font color also independent of it.
         end
         else
           if vsSelected in Node.States then
@@ -24642,7 +24643,6 @@ var
   TripleWidth: Integer;
   R: TRect;
   DrawFormat: Cardinal;
-  Size: TSize;
   Height: Integer;
 
 begin
@@ -24685,8 +24685,8 @@ begin
         // If the font has been changed then the ellipsis width must be recalculated.
         TripleWidth := 0;
         // Recalculate also the width of the normal text.
-        GetTextExtentPoint32W(Canvas.Handle, PWideChar(Text), Length(Text), Size);
-        NodeWidth := Size.cx + 2 * FTextMargin;
+        NodeWidth := DoTextMeasuring(Canvas, Node, Column, Text).cx + 2 * FTextMargin;
+        InvalidateNode(Node); // repaint node and selection as the font chnaged, see #1084
       end;
 
       DrawFormat := DT_NOPREFIX or DT_VCENTER or DT_SINGLELINE;
