@@ -4438,8 +4438,7 @@ begin
               Pen.Color := FColors.UnfocusedSelectionBorderColor;
             end;
 
-            with TWithSafeRect(R) do
-              RoundRect(Left, Top, Right, Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
+            RoundRect(R.Left, R.Top, R.Right, R.Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
           end
           else
           begin
@@ -7809,7 +7808,10 @@ begin
         else
         begin
           SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, @ScrollLines, 0);
-          ScrollAmount := Trunc(WheelFactor * ScrollLines * FHeader.Columns.GetScrollWidth);
+          if ScrollLines = WHEEL_PAGESCROLL then
+            ScrollAmount := Trunc(WheelFactor * (ClientWidth - FHeader.Columns.GetVisibleFixedWidth))
+          else
+            ScrollAmount := Integer(Trunc(WheelFactor * ScrollLines * FHeader.Columns.GetScrollWidth));
         end;
         SetOffsetX(FOffsetX + RTLFactor * ScrollAmount);
       end;
@@ -14799,8 +14801,6 @@ begin
       if SyncCheckstateWithSelection[PTmpNode] then
         checkstate[PTmpNode] := csCheckedNormal;
     end;
-
-    Assert(FSelectionCount = (lPreviousSelectedCount + NewLength), 'Fixing issue #487 seems to ahve caused a problem here.')
   end;
 end;
 
@@ -15429,17 +15429,14 @@ begin
         Inc(EdgeSize, BevelWidth);
       if BevelOuter <> bvNone then
         Inc(EdgeSize, BevelWidth);
-      with TWithSafeRect(RC) do
-      begin
-        if beLeft in BevelEdges then
-          Inc(Left, EdgeSize);
-        if beTop in BevelEdges then
-          Inc(Top, EdgeSize);
-        if beRight in BevelEdges then
-          Dec(Right, EdgeSize);
-        if beBottom in BevelEdges then
-          Dec(Bottom, EdgeSize);
-      end;
+      if beLeft in BevelEdges then
+        Inc(RC.Left, EdgeSize);
+      if beTop in BevelEdges then
+        Inc(RC.Top, EdgeSize);
+      if beRight in BevelEdges then
+        Dec(RC.Right, EdgeSize);
+      if beBottom in BevelEdges then
+        Dec(RC.Bottom, EdgeSize);
     end;
 
     // Repaint only the part in the original clipping region and not yet drawn parts.
@@ -16011,20 +16008,17 @@ begin
     begin
       case Alignment of
         taLeftJustify:
-          with TWithSafeRect(InnerRect) do
-            if Left + NodeWidth < Right then
-              Right := Left + NodeWidth;
+          if InnerRect.Left + NodeWidth < InnerRect.Right then
+            InnerRect.Right := InnerRect.Left + NodeWidth;
         taCenter:
-          with TWithSafeRect(InnerRect) do
-            if (Right - Left) > NodeWidth then
-            begin
-              Left := (Left + Right - NodeWidth) div 2;
-              Right := Left + NodeWidth;
-            end;
+          if (InnerRect.Right - InnerRect.Left) > NodeWidth then
+          begin
+            InnerRect.Left := (InnerRect.Left + InnerRect.Right - NodeWidth) div 2;
+            InnerRect.Right := InnerRect.Left + NodeWidth;
+          end;
         taRightJustify:
-          with TWithSafeRect(InnerRect) do
-            if (Right - Left) > NodeWidth then
-              Left := Right - NodeWidth;
+          if (InnerRect.Right - InnerRect.Left) > NodeWidth then
+            InnerRect.Left := InnerRect.Right - NodeWidth;
       end;
     end;
 
@@ -16050,8 +16044,7 @@ begin
                 if (toUseBlendedSelection in FOptions.PaintOptions) then
                   AlphaBlendSelection(Brush.Color)
                 else
-                  with TWithSafeRect(InnerRect) do
-                    RoundRect(Left, Top, Right, Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
+                  RoundRect(InnerRect.Left, InnerRect.Top, InnerRect.Right, InnerRect.Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
           end
           else
           begin
@@ -16085,8 +16078,7 @@ begin
                 if (toUseBlendedSelection in FOptions.PaintOptions) then
                   AlphaBlendSelection(Brush.Color)
                 else
-                  with TWithSafeRect(InnerRect) do
-                    RoundRect(Left, Top, Right, Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
+                  RoundRect(InnerRect.Left, InnerRect.Top, InnerRect.Right, InnerRect.Bottom, FSelectionCurveRadius, FSelectionCurveRadius);
           end;
       end;
     end;
@@ -22052,6 +22044,7 @@ var
   PaintWidth: Integer;
   CurrentNodeHeight: Integer;
   lUseSelectedBkColor: Boolean; // determines if the dotted grid lines need to be painted in selection color of background color
+  lEmptyListTextMargin: Integer;
 
   CellIsTouchingClientRight: Boolean;
   CellIsInLastColumn: Boolean;
@@ -22315,13 +22308,11 @@ begin
                             begin
                               if BidiMode = bdLeftToRight then
                               begin
-                                DrawDottedHLine(PaintInfo, CellRect.Left + IfThen(toFixedIndent in FOptions.PaintOptions, 1, IndentSize) * Integer(FIndent), CellRect.Right - 1,
-                                  CellRect.Bottom - 1);
+                                DrawDottedHLine(PaintInfo, CellRect.Left + PaintInfo.Offsets[ofsCheckBox] - fImagesMargin, CellRect.Right - 1, CellRect.Bottom - 1);
                               end
                               else
                               begin
-                                DrawDottedHLine(PaintInfo, CellRect.Left, CellRect.Right - IfThen(toFixedIndent in FOptions.PaintOptions, 1, IndentSize) * Integer(FIndent) - 1,
-                                  CellRect.Bottom - 1);
+                                DrawDottedHLine(PaintInfo, CellRect.Left, CellRect.Right - IfThen(toFixedIndent in FOptions.PaintOptions, 1, IndentSize) * Integer(FIndent) - 1, CellRect.Bottom - 1);
                               end;
                             end
                             else
@@ -22458,8 +22449,8 @@ begin
 
                 // Put the constructed node image onto the target canvas.
                 if not (poUnbuffered in PaintOptions) then
-                  with TWithSafeRect(TargetRect), NodeBitmap do
-                    BitBlt(TargetCanvas.Handle, Left, Top, Width, Height, Canvas.Handle, Window.Left, 0, SRCCOPY);
+                  with NodeBitmap do
+                    BitBlt(TargetCanvas.Handle, TargetRect.Left, TargetRect.Top, TargetRect.Width, TargetRect.Height, Canvas.Handle, Window.Left, 0, SRCCOPY);
               end;
             end;
 
@@ -22621,12 +22612,14 @@ begin
       begin
         // output a message if no items are to display
         Canvas.Font := Self.Font;
+        Canvas.Font.Size := Round(Canvas.Font.Size * 1.25);
         SetBkMode(TargetCanvas.Handle, TRANSPARENT);
-        R.Left := OffSetX + 2;
-        R.Top := 2;
-        R.Right := R.Left + Width - 2;
-        R.Bottom := Height -2;
-        TargetCanvas.Font.Color := clGrayText;
+        lEmptyListTextMargin := ScaledPixels(Max(cDefaultTextMargin, Self.TextMargin) * 2);
+        R.Left := OffSetX + lEmptyListTextMargin;
+        R.Top := lEmptyListTextMargin;
+        R.Right := R.Left + Width - lEmptyListTextMargin;
+        R.Bottom := Height - lEmptyListTextMargin;
+        TargetCanvas.Font.Color := StyleServices.GetStyleFontColor(TStyleFont.sfTreeItemTextDisabled);//clGrayText;
         TargetCanvas.TextRect(R, FEmptyListMessage, [tfNoClip, tfLeft, tfWordBreak, tfExpandTabs]);
       end;
 
@@ -22699,23 +22692,20 @@ begin
 
     // Check that we have a valid rectangle.
     PaintRect := TreeRect;
-    with TWithSafeRect(TreeRect) do
+    if TreeRect.Left < 0 then
     begin
-      if Left < 0 then
-      begin
-        PaintTarget.X := -Left;
-        PaintRect.Left := 0;
-      end
-      else
-        PaintTarget.X := 0;
-      if Top < 0 then
-      begin
-        PaintTarget.Y := -Top;
-        PaintRect.Top := 0;
-      end
-      else
-        PaintTarget.Y := 0;
-    end;
+      PaintTarget.X := -TreeRect.Left;
+      PaintRect.Left := 0;
+    end
+    else
+      PaintTarget.X := 0;
+    if TreeRect.Top < 0 then
+    begin
+      PaintTarget.Y := -TreeRect.Top;
+      PaintRect.Top := 0;
+    end
+    else
+      PaintTarget.Y := 0;
 
     Image := TBitmap.Create;
     with Image do
@@ -24644,7 +24634,7 @@ var
   R: TRect;
   DrawFormat: Cardinal;
   Height: Integer;
-
+  lNewNodeWidth: Integer;
 begin
   InitializeTextProperties(PaintInfo);
   with PaintInfo do
@@ -24685,9 +24675,13 @@ begin
         // If the font has been changed then the ellipsis width must be recalculated.
         TripleWidth := 0;
         // Recalculate also the width of the normal text.
-        NodeWidth := DoTextMeasuring(Canvas, Node, Column, Text).cx + 2 * FTextMargin;
-        InvalidateNode(Node); // repaint node and selection as the font chnaged, see #1084
-      end;
+        lNewNodeWidth := DoTextMeasuring(Canvas, Node, Column, Text).cx + 2 * FTextMargin;
+        if lNewNodeWidth <> NodeWidth then
+        begin
+          NodeWidth := lNewNodeWidth;
+          InvalidateNode(Node); // repaint node and selection as the font chnaged, see #1084
+        end;//if
+      end;// if FFontChanged
 
       DrawFormat := DT_NOPREFIX or DT_VCENTER or DT_SINGLELINE;
       if BidiMode <> bdLeftToRight then
