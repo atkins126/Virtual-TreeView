@@ -10068,7 +10068,7 @@ begin
         Run.NodeHeight := MulDiv(Run.NodeHeight, M, D);
         // The next three lines fix issue #1000
         lNewNodeTotalHeight := MulDiv(Run.TotalHeight, M, D);
-        FRoot.TotalHeight := FRoot.TotalHeight + lNewNodeTotalHeight - Run.TotalHeight; // 1 EIntOverflow exception seen here in debug build in 01/2021
+        FRoot.TotalHeight := Cardinal(Int64(FRoot.TotalHeight) + Int64(lNewNodeTotalHeight) - Int64(Run.TotalHeight)); // Avoiding EIntOverflow exception.
         Run.TotalHeight := lNewNodeTotalHeight;
       end;
       Run := GetNextNoInit(Run);
@@ -14791,11 +14791,13 @@ begin
     Inc(FSelectionCount, AddedNodesSize);
 
     // post process added nodes
+    // First set vsSelected flag for all newly selected nodes, then fire event
+    for I := 0 to AddedNodesSize - 1 do
+      Include(NewItems[I].States, vsSelected);
+
     for I := 0 to AddedNodesSize - 1 do
     begin
       PTmpNode := NewItems[I];
-      //sync path note: on click, multi-select ctrl-click and draw selection
-      Include(PTmpNode.States, vsSelected);
       // call on add event callbackevent
       if Assigned(FOnAddToSelection) then
         FOnAddToSelection(Self, PTmpNode);
@@ -17742,7 +17744,12 @@ begin
       DoUpdating(usUpdate);
   end;
   Inc(FUpdateCount);
-  DoStateChange([tsUpdating]);
+  try
+    DoStateChange([tsUpdating]);
+  except
+    EndUpdate();
+    raise;
+  end;
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -19460,7 +19467,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVirtualStringTree.GetLastSelected(ConsiderChildrenAbove: Boolean = False): PVirtualNode;
+function TBaseVirtualTree.GetLastSelected(ConsiderChildrenAbove: Boolean = False): PVirtualNode;
 
 // Returns the last node in the current selection while optionally considering toChildrenAbove.
 
