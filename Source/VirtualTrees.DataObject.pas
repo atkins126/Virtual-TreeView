@@ -9,6 +9,8 @@ uses
   Vcl.Controls;
 
 type
+  IDataObject = WinApi.ActiveX.IDataObject;
+
   // IDataObject.SetData support
   TInternalStgMedium = packed record
     Format : TClipFormat;
@@ -58,7 +60,8 @@ implementation
 uses
   VirtualTrees,
   VirtualTrees.ClipBoard,
-  VirtualTrees.DragnDrop;
+  VirtualTrees.DragnDrop,
+  VirtualTrees.BaseTree;
 
 type
   TVTCracker = class(TBaseVirtualTree);

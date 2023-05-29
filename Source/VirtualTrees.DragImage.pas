@@ -77,7 +77,8 @@ uses
   VirtualTrees,
   VirtualTrees.DragnDrop,
   VirtualTrees.Types,
-  VirtualTrees.Utils;
+  VirtualTrees.Utils,
+  VirtualTrees.BaseTree;
 
 //----------------- TVTDragImage ---------------------------------------------------------------------------------------
 
@@ -242,6 +243,7 @@ begin
           // If moved more than image size then just restore old screen and blit image to new position.
           BitBlt(ScreenDC, FImagePosition.X, FImagePosition.Y, FBackImage.Width, FBackImage.Height, FBackImage.Canvas.Handle, 0, 0, SRCCOPY);
 
+          GetPixel(ScreenDC, FImagePosition.X, FImagePosition.Y);
           if ForceRepaint then
             UpdateWindow(FOwner.Handle);
 

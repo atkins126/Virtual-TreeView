@@ -26,7 +26,7 @@ interface
 uses
   Windows, Messages, SysUtils, Classes, Graphics, Controls, Forms, Dialogs,
   VirtualTrees, StdCtrls, {$ifdef GraphicEx} GraphicEx, {$else} JPEG, {$endif}
-  ImgList, ComCtrls, UITypes, VirtualTrees.DrawTree, System.ImageList;
+  ImgList, ComCtrls, UITypes, VirtualTrees.DrawTree, System.ImageList, VirtualTrees.Types;
 
 type
   TDrawTreeForm = class(TForm)
@@ -376,7 +376,7 @@ begin
           pf32bit:
             Data.Properties := Data.Properties + ', 16M+ colors';
         end;
-        if Cardinal(Data.Image.Height) + 4 > TVirtualDrawTree(Sender).DefaultNodeHeight then
+        if Data.Image.Height + 4 > TVirtualDrawTree(Sender).DefaultNodeHeight then
             Sender.NodeHeight[Node] := Data.Image.Height + 4;
       except
         Data.Image.Free;

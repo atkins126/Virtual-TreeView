@@ -4,7 +4,8 @@ interface
 
 uses
   System.Classes,
-  VirtualTrees;
+  VirtualTrees.Types,
+  VirtualTrees.BaseTree;
 
 type
   // internal worker thread
