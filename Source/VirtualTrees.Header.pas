@@ -3,18 +3,18 @@
 interface
 
 uses
+  WinApi.Windows,
+  WinApi.Messages,
   System.Classes,
   System.Types,
   System.Generics.Collections,
-  WinApi.Windows,
-  WinApi.Messages,
   Vcl.Graphics,
   Vcl.Menus,
   Vcl.ImgList,
   Vcl.Controls,
   Vcl.Themes,
   Vcl.GraphUtil,
-  System.UITypes,
+  System.UITypes, // some types moved from Vcl.* to System.UITypes
   VirtualTrees.StyleHooks,
   VirtualTrees.Utils,
   VirtualTrees.Types,
@@ -113,7 +113,7 @@ type
 
   protected
     FLeft : TDimension;
-    procedure ChangeScale(M, D : TDimension; isDpiChange : Boolean); virtual;
+    procedure ChangeScale(M, D : TDimension); virtual;
     procedure ComputeHeaderLayout(var PaintInfo : THeaderPaintInfo; DrawFormat : Cardinal; CalculateTextRect : Boolean = False);
     procedure DefineProperties(Filer : TFiler); override;
     procedure GetAbsoluteBounds(var Left, Right : TDimension);
@@ -197,7 +197,6 @@ type
     FNeedPositionsFix : Boolean;      // True if FixPositions must still be called after DFM loading or Bidi mode change.
     FClearing         : Boolean;      // True if columns are being deleted entirely.
     FColumnPopupMenu  : TPopupMenu;   // Member for storing the TVTHeaderPopupMenu
-
     function GetCount : Integer;
     function GetItem(Index : TColumnIndex) : TVirtualTreeColumn;
     function GetNewIndex(P : TPoint; var OldIndex : TColumnIndex) : Boolean;
@@ -280,6 +279,7 @@ type
     property Header: TVTHeader read FHeader;
     property TrackIndex : TColumnIndex read FTrackIndex write FTrackIndex;
     property TreeView : TCustomControl read GetTreeView;
+    property UpdateCount;
   end;
 
   TVirtualTreeColumnsClass = class of TVirtualTreeColumns;
@@ -332,6 +332,7 @@ type
     FDragImage                   : TVTDragImage;            //drag image management during header drag
     FLastWidth                   : TDimension;              //Used to adjust spring columns. This is the width of all visible columns, not the header rectangle.
     FRestoreSelectionColumnIndex : Integer;                 //The column that is used to implement the coRestoreSelection option
+    FWasDoubleClick              : Boolean;                 // The previous mouse message was for a double click, that allows us to process mouse-up-messages differently
     function GetMainColumn : TColumnIndex;
     function GetUseColumns : Boolean;
     function IsFontStored : Boolean;
@@ -363,7 +364,7 @@ type
     procedure AutoScale(); virtual;
     function CanSplitterResize(P : TPoint) : Boolean;
     function CanWriteColumns : Boolean; virtual;
-    procedure ChangeScale(M, D : TDimension; isDpiChange : Boolean); virtual;
+    procedure ChangeScale(M, D : TDimension); virtual;
     function DetermineSplitterIndex(P : TPoint) : Boolean; virtual;
     procedure DoAfterAutoFitColumn(Column : TColumnIndex); virtual;
     procedure DoAfterColumnWidthTracking(Column : TColumnIndex); virtual;
@@ -378,7 +379,6 @@ type
     function DoHeightTracking(var P : TPoint; Shift : TShiftState) : Boolean; virtual;
     function DoHeightDblClickResize(var P : TPoint; Shift : TShiftState) : Boolean; virtual;
     procedure DoSetSortColumn(Value : TColumnIndex; pSortDirection : TSortDirection); virtual;
-    procedure DragTo(P : TPoint); virtual;
     procedure FixedAreaConstraintsChanged(Sender : TObject);
     function GetColumnsClass : TVirtualTreeColumnsClass; virtual;
     function GetOwner : TPersistent; override;
@@ -404,6 +404,8 @@ type
     procedure Assign(Source : TPersistent); override;
     procedure AutoFitColumns(); overload;
     procedure AutoFitColumns(Animated : Boolean; SmartAutoFitType : TSmartAutoFitType = smaUseColumnOption; RangeStartCol : Integer = NoColumn;  RangeEndCol : Integer = NoColumn); overload; virtual;
+    procedure ColumnDropped(const P: TPoint);
+    procedure DragTo(P : TPoint);
     function InHeader(P : TPoint) : Boolean; virtual;
     function InHeaderSplitterArea(P : TPoint) : Boolean; virtual;
     procedure Invalidate(Column : TVirtualTreeColumn; ExpandToBorder : Boolean = False; UpdateNowFlag : Boolean = False);
@@ -448,15 +450,16 @@ implementation
 
 uses
   WinApi.ShlObj,
+  WinApi.Ole2,
   WinApi.UxTheme,
   System.Math,
   System.SysUtils,
+  System.Generics.Defaults,
   Vcl.Forms,
-  VirtualTrees,
   VirtualTrees.HeaderPopup,
   VirtualTrees.BaseTree,
-  VirtualTrees.BaseAncestorVcl{to eliminate H2443 about inline expanding}
-  ;
+  VirtualTrees.BaseAncestorVcl, // to eliminate H2443 about inline expanding
+  VirtualTrees.DataObject;
 
 type
   TVirtualTreeColumnsCracker = class(TVirtualTreeColumns);
@@ -477,6 +480,9 @@ type
     function TreeViewControl : TBaseVirtualTreeCracker;
   end;
 
+const
+  cMargin = 2;                // the margin between text and the header rectangle
+  cDownOffset = 1;            // the offset of the column header text whit mouse button down
 
 
   //----------------- TVTFixedAreaConstraints ----------------------------------------------------------------------------
@@ -615,9 +621,7 @@ end;
 procedure TVTHeader.FontChanged(Sender : TObject);
 begin
   inherited;
-  {$IF CompilerVersion < 31}
   AutoScale();
-  {$IFEND}
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -638,12 +642,10 @@ begin
     with TBitmap.Create do
       try
         Canvas.Font.Assign(FFont);
-        lMaxHeight := lMaxHeight { top spacing } + (lMaxHeight div 2) { minimum bottom spacing } + Canvas.TextHeight('Q');
+        lMaxHeight := lMaxHeight { top spacing } + Divide(lMaxHeight, 2) { minimum bottom spacing } + Canvas.TextHeight('Q');
       finally
         Free;
       end;
-    //Get the maximum of the scaled original value and the minimum needed header height.
-    lMaxHeight := Max(lMaxHeight, FHeight);
     //Set the calculated size
     Self.SetHeight(lMaxHeight);
   end;
@@ -742,8 +744,8 @@ begin
   begin
     with FFixedAreaConstraints do
     begin
-      RelativeMaxHeight := ((Tree.ClientHeight + FHeight) * FMaxHeightPercent) div 100;
-      RelativeMinHeight := ((Tree.ClientHeight + FHeight) * FMinHeightPercent) div 100;
+      RelativeMaxHeight := Divide((Tree.ClientHeight + FHeight) * FMaxHeightPercent, 100);
+      RelativeMinHeight := Divide((Tree.ClientHeight + FHeight) * FMinHeightPercent, 100);
 
       EffectiveMinHeight := IfThen(FMaxHeightPercent > 0, Min(RelativeMaxHeight, FMinHeight), FMinHeight);
       EffectiveMaxHeight := IfThen(FMinHeightPercent > 0, Max(RelativeMinHeight, FMaxHeight), FMaxHeight);
@@ -932,9 +934,7 @@ end;
 
 procedure TVTHeader.StyleChanged();
 begin
-  {$IF CompilerVersion < 31}
-  AutoScale(False); //Elements may have changed in size
-  {$IFEND}
+  AutoScale(); //Elements may have changed in size
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -949,7 +949,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-procedure TVTHeader.ChangeScale(M, D : TDimension; isDpiChange : Boolean);
+procedure TVTHeader.ChangeScale(M, D : TDimension);
 var
   I : Integer;
 begin
@@ -957,13 +957,11 @@ begin
   FMinHeight := MulDiv(FMinHeight, M, D);
   FMaxHeight := MulDiv(FMaxHeight, M, D);
   Self.Height := MulDiv(FHeight, M, D);
-  if not ParentFont then
-    Font.Height := MulDiv(Font.Height, M, D);
   //Scale the columns widths too
   for I := 0 to FColumns.Count - 1 do
-    TVirtualTreeColumnCracker(Self.FColumns[I]).ChangeScale(M, D, isDpiChange);
-  if not isDpiChange then
-    AutoScale();
+    TVirtualTreeColumnCracker(Self.FColumns[I]).ChangeScale(M, D);
+  if not ParentFont then
+    Font.Height := MulDiv(Font.Height, M, D);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -1235,7 +1233,7 @@ begin
   if NewTarget >= 0 then
   begin
     FColumns.GetColumnBounds(NewTarget, Left, Right);
-    if (ClientP.X < ((Left + Right) div 2)) <> FColumns.DropBefore then
+    if (ClientP.X < Divide((Left + Right), 2)) <> FColumns.DropBefore then
     begin
       NeedRepaint := True;
       FColumns.DropBefore := not FColumns.DropBefore;
@@ -1260,25 +1258,7 @@ begin
 
   //Fix for various problems mentioned in issue 248.
   if NeedRepaint then
-  begin
     TBaseVirtualTreeCracker(FOwner).UpdateWindow();
-
-    //The new routine recaptures the backup image after the updatewindow
-    //Note: We could have called this unconditionally but when called
-    //over the tree, doesn't capture the background image. Since our
-    //problems are in painting of the header, we call it only when the
-    //drag image is over the header.
-    if
-    //determine the case when the drag image is or was on the header area
-      (InHeader(FOwner.ScreenToClient(FDragImage.LastPosition)) or InHeader(FOwner.ScreenToClient(FDragImage.ImagePosition))) then
-    begin
-      GDIFlush;
-      TBaseVirtualTreeCracker(FOwner).UpdateWindowAndDragImage(TBaseVirtualTree(FOwner), TBaseVirtualTreeCracker(FOwner).HeaderRect, True, True);
-    end;
-    //since we took care of UpdateWindow above, there is no need to do an
-    //update window again by sending NeedRepaint. So switch off the second parameter.
-    NeedRepaint := False;
-  end;
 
   FDragImage.DragTo(P, NeedRepaint);
 end;
@@ -1347,7 +1327,7 @@ var
   P             : TPoint;
   NextColumn, I : TColumnIndex;
   NewWidth      : TDimension;
-  iOffsetX: Integer;
+  iOffsetX      : TDimension;
 
 begin
   Result := False;
@@ -1457,9 +1437,7 @@ function TVTHeader.HandleMessage(var Message : TMessage) : Boolean;
 
 var
   P                                          : TPoint;
-  R                                          : TRect;
   I                                          : TColumnIndex;
-  OldPosition                                : Integer;
   HitIndex                                   : TColumnIndex;
   NewCursor                                  : TVTCursor;
   Button                                     : TMouseButton;
@@ -1527,9 +1505,11 @@ begin
             CheckBoxHit := False;
           end;
         end;
+        fWasDoubleClick := False;
       end;
     WM_LBUTTONDBLCLK, WM_NCLBUTTONDBLCLK, WM_NCMBUTTONDBLCLK, WM_NCRBUTTONDBLCLK :
       begin
+        fWasDoubleClick := True;
         if Message.Msg <> WM_LBUTTONDBLCLK then
           with TWMNCLButtonDblClk(Message) do
             P := FOwner.ScreenToClient(Point(XCursor, YCursor))
@@ -1556,14 +1536,14 @@ begin
         begin
           case Message.Msg of
             WM_NCMBUTTONDBLCLK :
-              Button := mbMiddle;
+              Button := TMouseButton.mbMiddle;
             WM_NCRBUTTONDBLCLK :
-              Button := mbRight;
+              Button := TMouseButton.mbRight;
           else
               //WM_NCLBUTTONDBLCLK
-            Button := mbLeft;
+            Button := TMouseButton.mbLeft;
           end;
-          if Button = mbLeft then
+          if Button = TMouseButton.mbLeft then
             TVirtualTreeColumnsCracker(FColumns).AdjustDownColumn(P);
           TVirtualTreeColumnsCracker(FColumns).HandleClick(P, Button, True, True);
         end;
@@ -1651,14 +1631,14 @@ begin
 
         //This is a good opportunity to notify the application.
         if not (csDesigning in Tree.ComponentState) and IsInHeader then
-          TBaseVirtualTreeCracker(FOwner).DoHeaderMouseDown(mbLeft, GetShiftState, P.X, P.Y + FHeight);
+          TBaseVirtualTreeCracker(FOwner).DoHeaderMouseDown(TMouseButton.mbLeft, GetShiftState, P.X, P.Y + FHeight);
       end;
     WM_NCRBUTTONDOWN :
       begin
         with TWMNCRButtonDown(Message) do
           P := FOwner.ScreenToClient(Point(XCursor, YCursor));
         if InHeader(P) then
-          TBaseVirtualTreeCracker(FOwner).DoHeaderMouseDown(mbRight, GetShiftState, P.X, P.Y + FHeight);
+          TBaseVirtualTreeCracker(FOwner).DoHeaderMouseDown(TMouseButton.mbRight, GetShiftState, P.X, P.Y + FHeight);
       end;
     WM_NCRBUTTONUP :
       if not (csDesigning in FOwner.ComponentState) then
@@ -1668,9 +1648,10 @@ begin
           P := FOwner.ScreenToClient(Point(XCursor, YCursor));
           if InHeader(P) then
           begin
-            HandleMessage := TVirtualTreeColumnsCracker(FColumns).HandleClick(P, mbRight, True, False);
-            TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(mbRight, GetShiftState, P.X, P.Y + FHeight);
+            HandleMessage := TVirtualTreeColumnsCracker(FColumns).HandleClick(P, TMouseButton.mbRight, True, False);
+            TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(TMouseButton.mbRight, GetShiftState, P.X, P.Y + FHeight);
           end;
+          fWasDoubleClick := False;
         end;
     //When the tree window has an active mouse capture then we only get "client-area" messages.
     WM_LBUTTONUP, WM_NCLBUTTONUP :
@@ -1685,57 +1666,11 @@ begin
             //successfull dragging moves columns
             with TWMLButtonUp(Message) do
               P := Tree.ClientToScreen(Point(XPos, YPos));
-            GetWindowRect(Tree.Handle, R);
-            with FColumns do
-            begin
-              FDragImage.EndDrag;
-
-              //Problem fixed:
-              //Column Header does not paint correctly after a drop in certain conditions
-              // ** The conditions are, drag is across header, mouse is not moved after
-              //the drop and the graphics hardware is slow in certain operations (encountered
-              //on Windows 10).
-              //Fix for the problem on certain systems where the dropped column header
-              //does not appear in the new position if the mouse is not moved after
-              //the drop. The reason is that the restore backup image operation (BitBlt)
-              //in the above EndDrag is slower than the header repaint in the code below
-              //and overlaps the new changed header with the older image.
-              //This happens because BitBlt seems to operate in its own thread in the
-              //graphics hardware and finishes later than the following code.
-              //
-              //To solve this problem, we introduce a small delay here so that the
-              //changed header in the following code is correctly repainted after
-              //the delayed BitBlt above has finished operation to restore the old
-              //backup image.
-              sleep(50);
-
-              if (DropTarget > - 1) and (DropTarget <> DragIndex) and PtInRect(R, P) then
-              begin
-                OldPosition := FColumns[DragIndex].Position;
-                if FColumns.DropBefore then
-                begin
-                  if FColumns[DragIndex].Position < FColumns[DropTarget].Position then
-                    FColumns[DragIndex].Position := Max(0, FColumns[DropTarget].Position - 1)
-                  else
-                    FColumns[DragIndex].Position := FColumns[DropTarget].Position;
-                end
-                else
-                begin
-                  if FColumns[DragIndex].Position < FColumns[DropTarget].Position then
-                    FColumns[DragIndex].Position := FColumns[DropTarget].Position
-                  else
-                    FColumns[DragIndex].Position := FColumns[DropTarget].Position + 1;
-                end;
-                Tree.DoHeaderDragged(DragIndex, OldPosition);
-              end
-              else
-                Tree.DoHeaderDraggedOut(DragIndex, P);
-              DropTarget := NoColumn;
-            end;
-            Invalidate(nil);
+            ColumnDropped(P);
           end;
           Result := True;
           Message.Result := 0;
+          fWasDoubleClick := False;
         end;
 
         case Message.Msg of
@@ -1745,17 +1680,21 @@ begin
               with TVirtualTreeColumnsCracker(FColumns) do
               begin
                 if DownIndex > NoColumn then
-                  HandleClick(Point(XPos, YPos), mbLeft, False, False);
+                  HandleClick(Point(XPos, YPos), TMouseButton.mbLeft, False, False);
               end;
               if FStates <> [] then
-                TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(mbLeft, KeysToShiftState(Keys), XPos, YPos);
+                TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(TMouseButton.mbLeft, KeysToShiftState(Keys), XPos, YPos);
+              fWasDoubleClick := False;
             end;
           WM_NCLBUTTONUP :
-            with TWMNCLButtonUp(Message) do
             begin
-              P := FOwner.ScreenToClient(Point(XCursor, YCursor));
-              TVirtualTreeColumnsCracker(FColumns).HandleClick(P, mbLeft, True, False);
-              TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(mbLeft, GetShiftState, P.X, P.Y + FHeight);
+              with TWMNCLButtonUp(Message) do
+                P := FOwner.ScreenToClient(Point(XCursor, YCursor));
+              if not fWasDoubleClick then
+                TVirtualTreeColumnsCracker(FColumns).HandleClick(P, TMouseButton.mbLeft, True, False);
+              TBaseVirtualTreeCracker(FOwner).DoHeaderMouseUp(TMouseButton.mbLeft, GetShiftState, P.X, P.Y + FHeight);
+              Result := True;
+              fWasDoubleClick := False;
             end;
         end;
 
@@ -1896,6 +1835,61 @@ begin
   end;
 end;
 
+procedure TVTHeader.ColumnDropped(const P: TPoint);
+var
+  R: TRect;
+  OldPosition: Integer;
+begin
+  GetWindowRect(Tree.Handle, R);
+  with FColumns do
+  begin
+    FDragImage.EndDrag;
+
+    //Problem fixed:
+    //Column Header does not paint correctly after a drop in certain conditions
+    // ** The conditions are, drag is across header, mouse is not moved after
+    //the drop and the graphics hardware is slow in certain operations (encountered
+    //on Windows 10).
+    //Fix for the problem on certain systems where the dropped column header
+    //does not appear in the new position if the mouse is not moved after
+    //the drop. The reason is that the restore backup image operation (BitBlt)
+    //in the above EndDrag is slower than the header repaint in the code below
+    //and overlaps the new changed header with the older image.
+    //This happens because BitBlt seems to operate in its own thread in the
+    //graphics hardware and finishes later than the following code.
+    //
+    //To solve this problem, we introduce a small delay here so that the
+    //changed header in the following code is correctly repainted after
+    //the delayed BitBlt above has finished operation to restore the old
+    //backup image.
+    sleep(50);
+
+    if (DropTarget > - 1) and (DropTarget <> DragIndex) and PtInRect(R, P) then
+    begin
+      OldPosition := FColumns[DragIndex].Position;
+      if FColumns.DropBefore then
+      begin
+        if FColumns[DragIndex].Position < FColumns[DropTarget].Position then
+          FColumns[DragIndex].Position := Max(0, FColumns[DropTarget].Position - 1)
+        else
+          FColumns[DragIndex].Position := FColumns[DropTarget].Position;
+      end
+      else
+      begin
+        if FColumns[DragIndex].Position < FColumns[DropTarget].Position then
+          FColumns[DragIndex].Position := FColumns[DropTarget].Position
+        else
+          FColumns[DragIndex].Position := FColumns[DropTarget].Position + 1;
+      end;
+      Tree.DoHeaderDragged(DragIndex, OldPosition);
+    end
+    else
+      Tree.DoHeaderDraggedOut(DragIndex, P);
+    DropTarget := NoColumn;
+  end;
+  Invalidate(nil);
+end;
+
 //----------------------------------------------------------------------------------------------------------------------
 
 procedure TVTHeader.ImageListChange(Sender : TObject);
@@ -1913,9 +1907,11 @@ procedure TVTHeader.PrepareDrag(P, Start : TPoint);
 
 var
   Image      : TBitmap;
-  ImagePos   : TPoint;
+  HotSpot    : TPoint;
   DragColumn : TVirtualTreeColumn;
   RTLOffset  : TDimension;
+  lDataObject: IDataObject;
+  lDragEffect: DWord; // The last executed drag effect, not needed here
 
 begin
   //Determine initial position of drag image (screen coordinates).
@@ -1943,19 +1939,19 @@ begin
       with DragColumn do
         FColumns.PaintHeader(Canvas, Rect(Left, 0, Left + Width, Height), Point( - RTLOffset, 0), RTLOffset);
 
-      if Tree.UseRightToLeftAlignment then
-        ImagePos := Tree.ClientToScreen(Point(DragColumn.Left + Tree.ComputeRTLOffset(True), 0))
-      else
-        ImagePos := Tree.ClientToScreen(Point(DragColumn.Left, 0));
       //Column rectangles are given in local window coordinates not client coordinates.
-      Dec(ImagePos.Y, FHeight);
+      HotSpot := Tree.ScreenToClient(P);
+      HotSpot.X := HotSpot.X - DragColumn.Left - cMargin;
+      HotSpot.Y := HotSpot.Y + Height - cMargin; // header is in the non-client area and so the coordinates are negative
 
       if hoRestrictDrag in FOptions then
         FDragImage.MoveRestriction := dmrHorizontalOnly
       else
         FDragImage.MoveRestriction := dmrNone;
-      FDragImage.PrepareDrag(Image, ImagePos, P, nil);
-      FDragImage.ShowDragImage;
+
+      lDataObject := TVTDataObject.Create(Self, TreeView);
+      FDragImage.PrepareDrag(Image, HotSpot, lDataObject);
+      SHDoDragDrop(fOwner.Handle, lDataObject, nil, DROPEFFECT_MOVE, lDragEffect); // SHDoDragDrop() supports drag hints and drag images on Windows Vista and later
     finally
       Image.Free;
     end;
@@ -1994,7 +1990,7 @@ procedure TVTHeader.RescaleHeader;
 //Rescale the fixed elements (fixed columns, header itself) to FixedAreaConstraints.
 
 var
-  FixedWidth, MaxFixedWidth, MinFixedWidth : Integer;
+  FixedWidth, MaxFixedWidth, MinFixedWidth : TDimension;
 
   //--------------- local function --------------------------------------------
 
@@ -2018,8 +2014,8 @@ var
 
     with FFixedAreaConstraints do
     begin
-      MinFixedWidth := (Tree.ClientWidth * FMinWidthPercent) div 100;
-      MaxFixedWidth := (Tree.ClientWidth * FMaxWidthPercent) div 100;
+      MinFixedWidth := Divide(Tree.ClientWidth * FMinWidthPercent, 100);
+      MaxFixedWidth := Divide(Tree.ClientWidth * FMaxWidthPercent, 100);
     end;
   end;
 
@@ -2186,6 +2182,8 @@ begin
   // GnutGetText skips non-stored properties, so retur Stored True at runtime
   Result := not (csDesigning in Self.Treeview.ComponentState);
 end;
+
+//----------------------------------------------------------------------------------------------------------------------
 
 procedure TVTHeader.Assign(Source : TPersistent);
 
@@ -2605,7 +2603,7 @@ var
     if (MaxReserveCol <= NoColumn) or (Constraints[MaxReserveCol - RangeStartCol] <= 10) then
       Result := False
     else
-      Dec(Constraints[MaxReserveCol - RangeStartCol], Constraints[MaxReserveCol - RangeStartCol] div 10);
+      Dec(Constraints[MaxReserveCol - RangeStartCol], Divide(Constraints[MaxReserveCol - RangeStartCol], 10));
   end;
 
 //----------- end local functions -------------------------------------------
@@ -2722,6 +2720,7 @@ procedure TVTHeader.SaveToStream(const Stream : TStream);
 
 var
   Dummy : Integer;
+  DummyDimension: TDimension;			   
   Tmp   : AnsiString;
 
 begin
@@ -2744,8 +2743,8 @@ begin
     WriteBuffer(Dummy, SizeOf(Dummy));
     Dummy := FBackgroundColor;
     WriteBuffer(Dummy, SizeOf(Dummy));
-    Dummy := FHeight;
-    WriteBuffer(Dummy, SizeOf(Dummy));
+    DummyDimension:= FHeight;
+    WriteBuffer(DummyDimension, SizeOf(DummyDimension));
     Dummy := Integer(FOptions);
     WriteBuffer(Dummy, SizeOf(Dummy));
     //PopupMenu is neither saved nor restored
@@ -2758,8 +2757,8 @@ begin
       WriteBuffer(Dummy, SizeOf(Dummy));
 
       //Need only to write one: size or height, I decided to write height.
-      Dummy := Height;
-      WriteBuffer(Dummy, SizeOf(Dummy));
+      DummyDimension := Height;
+      WriteBuffer(DummyDimension, SizeOf(DummyDimension));
       Tmp := UTF8Encode(Name);
       Dummy := Length(Tmp);
       WriteBuffer(Dummy, SizeOf(Dummy));
@@ -2781,12 +2780,13 @@ begin
     //Data introduced by stream version 5.
     Dummy := Integer(ParentFont);
     WriteBuffer(Dummy, SizeOf(Dummy));
-    Dummy := Integer(FMaxHeight);
-    WriteBuffer(Dummy, SizeOf(Dummy));
-    Dummy := Integer(FMinHeight);
-    WriteBuffer(Dummy, SizeOf(Dummy));
-    Dummy := Integer(FDefaultHeight);
-    WriteBuffer(Dummy, SizeOf(Dummy));
+    DummyDimension := FMaxHeight;
+    WriteBuffer(DummyDimension, SizeOf(DummyDimension));
+    DummyDimension := FMinHeight;
+    WriteBuffer(DummyDimension, SizeOf(DummyDimension));
+    DummyDimension := FDefaultHeight;
+    WriteBuffer(DummyDimension, SizeOf(DummyDimension));
+
     with FFixedAreaConstraints do
     begin
       Dummy := Integer(FMaxHeightPercent);
@@ -2843,6 +2843,8 @@ begin
     FPosition := Owner.Count - 1;
   end;
 end;
+
+//----------------------------------------------------------------------------------------------------------------------
 
 procedure TVirtualTreeColumn.SetCollection(Value : TCollection);
 begin
@@ -3403,18 +3405,18 @@ begin
         begin
           // The percentage values have precedence over the pixel values.
           If MaxWidthPercent > 0 then
-            TotalFixedMinWidth := Min((ClientWidth * MaxWidthPercent) div 100, TotalFixedMinWidth);
+            TotalFixedMinWidth := Min(Divide(ClientWidth * MaxWidthPercent, 100), TotalFixedMinWidth);
           If MinWidthPercent > 0 then
-            TotalFixedMaxWidth := Max((ClientWidth * MinWidthPercent) div 100, TotalFixedMaxWidth);
+            TotalFixedMaxWidth := Max(Divide(ClientWidth * MinWidthPercent, 100), TotalFixedMaxWidth);
 
           EffectiveMaxWidth := Min(TotalFixedMaxWidth - (Columns.GetVisibleFixedWidth - Self.FWidth), FMaxWidth);
           EffectiveMinWidth := Max(TotalFixedMinWidth - (Columns.GetVisibleFixedWidth - Self.FWidth), FMinWidth);
           Value := Min(Max(Value, EffectiveMinWidth), EffectiveMaxWidth);
 
           if MinWidthPercent > 0 then
-            Value := Max((ClientWidth * MinWidthPercent) div 100 - Columns.GetVisibleFixedWidth + Self.FWidth, Value);
+            Value := Max(Divide(ClientWidth * MinWidthPercent, 100) - Columns.GetVisibleFixedWidth + Self.FWidth, Value);
           if MaxWidthPercent > 0 then
-            Value := Min((ClientWidth * MaxWidthPercent) div 100 - Columns.GetVisibleFixedWidth + Self.FWidth, Value);
+            Value := Min(Divide(ClientWidth * MaxWidthPercent, 100) - Columns.GetVisibleFixedWidth + Self.FWidth, Value);
         end;// if HandleAllocated
       end;
     end
@@ -3442,7 +3444,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-procedure TVirtualTreeColumn.ChangeScale(M, D : TDimension; isDpiChange : Boolean);
+procedure TVirtualTreeColumn.ChangeScale(M, D : TDimension);
 begin
   FMinWidth := MulDiv(FMinWidth, M, D);
   FMaxWidth := MulDiv(FMaxWidth, M, D);
@@ -3514,7 +3516,7 @@ begin
       end;
 
       // In any case, the sort glyph is vertically centered.
-      PaintInfo.SortGlyphPos.Y := (ClientSize.Y - PaintInfo.SortGlyphSize.cy) div 2;
+      PaintInfo.SortGlyphPos.Y := Divide(ClientSize.Y - PaintInfo.SortGlyphSize.cy, 2);
     end
     else
     begin
@@ -3556,29 +3558,29 @@ begin
   if PaintInfo.ShowSortGlyph and not (UseText or PaintInfo.ShowHeaderGlyph) then
   begin
     // Center the sort glyph in the available area if nothing else is there.
-    PaintInfo.SortGlyphPos := Point((ClientSize.X - PaintInfo.SortGlyphSize.cx) div 2, (ClientSize.Y - PaintInfo.SortGlyphSize.cy) div 2);
+    PaintInfo.SortGlyphPos := Point(Divide(ClientSize.X - PaintInfo.SortGlyphSize.cx, 2), Divide(ClientSize.Y - PaintInfo.SortGlyphSize.cy, 2));
   end
   else
   begin
     // Determine extents of text and glyph and calculate positions which are clear from the layout.
     if (Layout in [blGlyphLeft, blGlyphRight]) or not PaintInfo.ShowHeaderGlyph then
     begin
-      PaintInfo.GlyphPos.Y := (ClientSize.Y - HeaderGlyphSize.Y) div 2;
+      PaintInfo.GlyphPos.Y := Divide(ClientSize.Y - HeaderGlyphSize.Y, 2);
       // If the text is taller than the given height, perform no vertical centration as this
       // would make the text even less readable.
       //Using Max() fixes badly positioned text if Extra Large fonts have been activated in the Windows display options
-      TextPos.Y := Max( - 5, (ClientSize.Y - TextSize.cy) div 2);
+      TextPos.Y := Max( - 5, Divide(ClientSize.Y - TextSize.cy, 2));
     end
     else
     begin
       if Layout = blGlyphTop then
       begin
-        PaintInfo.GlyphPos.Y := (ClientSize.Y - HeaderGlyphSize.Y - TextSize.cy - TextSpacing) div 2;
+        PaintInfo.GlyphPos.Y := Divide(ClientSize.Y - HeaderGlyphSize.Y - TextSize.cy - TextSpacing, 2);
         TextPos.Y := PaintInfo.GlyphPos.Y + HeaderGlyphSize.Y + TextSpacing;
       end
       else
       begin
-        TextPos.Y := (ClientSize.Y - HeaderGlyphSize.Y - TextSize.cy - TextSpacing) div 2;
+        TextPos.Y := Divide(ClientSize.Y - HeaderGlyphSize.Y - TextSize.cy - TextSpacing, 2);
         PaintInfo.GlyphPos.Y := TextPos.Y + TextSize.cy + TextSpacing;
       end;
     end;
@@ -3601,7 +3603,7 @@ begin
             TextPos.X := MinLeft;
             if PaintInfo.ShowHeaderGlyph then
             begin
-              PaintInfo.GlyphPos.X := (ClientSize.X - HeaderGlyphSize.X) div 2;
+              PaintInfo.GlyphPos.X := Divide(ClientSize.X - HeaderGlyphSize.X, 2);
               if PaintInfo.GlyphPos.X < MinLeft then
                 PaintInfo.GlyphPos.X := MinLeft;
               MinLeft := Max(TextPos.X + TextSize.cx + TextSpacing, PaintInfo.GlyphPos.X + HeaderGlyphSize.X + FSpacing);
@@ -3633,14 +3635,14 @@ begin
         begin
           if Layout in [blGlyphTop, blGlyphBottom] then
           begin
-            PaintInfo.GlyphPos.X := (ClientSize.X - HeaderGlyphSize.X) div 2;
-            TextPos.X := (ClientSize.X - TextSize.cx) div 2;
+            PaintInfo.GlyphPos.X := Divide(ClientSize.X - HeaderGlyphSize.X, 2);
+            TextPos.X := Divide(ClientSize.X - TextSize.cx, 2);
             if PaintInfo.ShowSortGlyph then
-              Dec(TextPos.X, PaintInfo.SortGlyphSize.cx div 2);
+              Dec(TextPos.X, Divide(PaintInfo.SortGlyphSize.cx, 2));
           end
           else
           begin
-            MinLeft := (ClientSize.X - HeaderGlyphSize.X - TextSpacing - TextSize.cx) div 2;
+            MinLeft := Divide(ClientSize.X - HeaderGlyphSize.X - TextSpacing - TextSize.cx, 2);
             if PaintInfo.ShowHeaderGlyph and (Layout = blGlyphLeft) then
             begin
               PaintInfo.GlyphPos.X := MinLeft;
@@ -3689,7 +3691,7 @@ begin
         TextPos.X := MaxRight - TextSize.cx;
         if PaintInfo.ShowHeaderGlyph then
         begin
-          PaintInfo.GlyphPos.X := (ClientSize.X - HeaderGlyphSize.X) div 2;
+          PaintInfo.GlyphPos.X := Divide(ClientSize.X - HeaderGlyphSize.X, 2);
           if PaintInfo.GlyphPos.X + HeaderGlyphSize.X + FSpacing > MaxRight then
             PaintInfo.GlyphPos.X := MaxRight - HeaderGlyphSize.X - FSpacing;
           MaxRight := Min(TextPos.X - TextSpacing, PaintInfo.GlyphPos.X - FSpacing);
@@ -4398,26 +4400,36 @@ end;
 //----------------------------------------------------------------------------------------------------------------------
 
 procedure TVirtualTreeColumns.FixPositions;
-
 // Fixes column positions after loading from DFM or Bidi mode change.
-
 var
-  I : Integer;
-
+  LColumnsByPos: TList<TVirtualTreeColumn>;
+  I: Integer;
 begin
-  // Fix positions that too large, see #1179
-  for I := 0 to Count - 1 do
-  begin
-    if Integer(Items[I].Position) >= Count then
-    begin
-      UpdatePositions(True);
-      break;
-    end;
-  end; // for
+  LColumnsByPos := TList<TVirtualTreeColumn>.Create;
+  try
+    LColumnsByPos.Capacity := Self.Count;
+    for I := 0 to Self.Count-1 do
+      LColumnsByPos.Add(Items[I]);
 
-  // Update position array
-  for I := 0 to Count - 1 do
-    FPositionToIndex[Items[I].Position] := I;
+    LColumnsByPos.Sort(
+      TComparer<TVirtualTreeColumn>.Construct(
+        function(const A, B: TVirtualTreeColumn): Integer
+        begin
+          Result := CompareValue(A.Position, B.Position);
+          if Result = 0 then
+            Result := CompareValue(A.Index, B.Index);
+        end)
+    );
+
+    for I := 0 to LColumnsByPos.Count-1 do
+    begin
+      LColumnsByPos[I].FPosition := I;
+      Self.FPositionToIndex[I] := LColumnsByPos[I].Index;
+    end;
+
+  finally
+	  LColumnsByPos.Free;
+  end;
 
   FNeedPositionsFix := False;
   UpdatePositions(True);
@@ -4868,7 +4880,7 @@ begin
       with TreeViewControl do
         try
           Steps := 32;
-          DX := (NewWidth - OldWidth) div Steps;
+          DX := Divide(NewWidth - OldWidth, Steps);
 
         // Determination of the scroll rectangle is a bit complicated since we neither want
         // to scroll the scrollbars nor the border of the treeview window.
@@ -5249,6 +5261,7 @@ begin
       Result := FPositionToIndex[Position - 1]
     else
       Result := InvalidColumn;
+    Assert(Column <> Result, 'The previous column must not have the same position as the given column.');
   end;
 end;
 
@@ -5619,7 +5632,7 @@ var
         PaintRectangle := ATargetRect;
 
         // calculate text and glyph position
-        InflateRect(PaintRectangle, - 2, - 2);
+        InflateRect(PaintRectangle, - cMargin, - cMargin);
         DrawFormat := DT_TOP or DT_NOPREFIX;
         case CaptionAlignment of
           taLeftJustify :
@@ -5636,7 +5649,7 @@ var
         // Move glyph and text one pixel to the right and down to simulate a pressed button.
         if IsDownIndex then
         begin
-          OffsetRect(TextRectangle, 1, 1);
+          OffsetRect(TextRectangle, cDownOffset, cDownOffset);
           Inc(GlyphPos.X);
           Inc(GlyphPos.Y);
           Inc(SortGlyphPos.X);
@@ -5790,7 +5803,7 @@ begin
     TargetRect.Left := Target.X - R.Left + Items[Run].FLeft + RTLOffset;
     // TargetRect.Right will be set in the loop
 
-    ShowRightBorder := (Header.Style = hsThickButtons) or not (hoAutoResize in Header.Options) or (TreeViewControl.BevelKind = bkNone);
+    ShowRightBorder := (Header.Style = hsThickButtons) or not (hoAutoResize in Header.Options) or (TreeViewControl.BevelKind = TBevelKind.bkNone);
 
     // Now go for each button.
     while (Run > NoColumn) and (TargetRect.Left < MaxX) do
@@ -5861,11 +5874,11 @@ var
   lArrowWidth : TDimension;
 begin
   lArrowWidth := TBaseVirtualTreeCracker(Self.Column.TreeViewControl).ScaledPixels(5);
-  Y := (PaintRectangle.Top + PaintRectangle.Bottom - 3 * lArrowWidth) div 2;
+  Y := Divide(PaintRectangle.Top + PaintRectangle.Bottom - 3 * lArrowWidth, 2);
   if DropMark = dmmLeft then
     DrawArrow(TargetCanvas, TScrollDirection.sdLeft, Point(PaintRectangle.Left, Y), lArrowWidth)
   else
-    DrawArrow(TargetCanvas, TScrollDirection.sdRight, Point(PaintRectangle.Right - lArrowWidth - (lArrowWidth div 2) {spacing}, Y), lArrowWidth);
+    DrawArrow(TargetCanvas, TScrollDirection.sdRight, Point(PaintRectangle.Right - lArrowWidth - Divide(lArrowWidth, 2) {spacing}, Y), lArrowWidth);
 end;
 
 procedure THeaderPaintInfo.DrawSortArrow(pDirection : TSortDirection);

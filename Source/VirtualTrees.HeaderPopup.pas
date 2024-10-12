@@ -68,7 +68,6 @@ interface
 uses
   System.Classes,
   Vcl.Menus,
-  VirtualTrees,
   VirtualTrees.Types,
   VirtualTrees.BaseTree;
 
@@ -109,7 +108,8 @@ type
 implementation
 
 uses
-  Winapi.Windows, System.Types,
+  Winapi.Windows,
+  System.Types,
   VirtualTrees.Header;
 
 resourcestring

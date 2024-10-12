@@ -6,15 +6,15 @@ uses
   WinApi.ActiveX,
   Winapi.Windows,
   Winapi.Messages,
+  System.Types,
+  System.Classes,
+  System.SysUtils,
   Vcl.Controls,
   Vcl.GraphUtil,
   Vcl.Themes,
   Vcl.Graphics,
   Vcl.ImgList,
-  System.Types,
-  System.Classes,
-  System.SysUtils,
-  System.UITypes;
+  System.UITypes; // some types moved from Vcl.* to System.UITypes
 
 {$MINENUMSIZE 1, make enumerations as small as possible}
 
@@ -28,6 +28,7 @@ const
   ShadowSize               = 5;    // Size in pixels of the hint shadow. This value has no influence on Win2K and XP systems
                                    // as those OSes have native shadow support.
   cDefaultTextMargin       = 4;    // The default margin of text
+  cInitialDefaultNodeHeight= 18;   // the default value of the DefualtNodeHeight property
 
   // Special identifiers for columns.
   NoColumn                 = - 1;
@@ -93,6 +94,7 @@ const
   //       to implement optimized moves and other back references.
   CFSTR_VIRTUALTREE        = 'Virtual Tree Data';
   CFSTR_VTREFERENCE        = 'Virtual Tree Reference';
+  CFSTR_VTHEADERREFERENCE  = 'Virtual Tree Header Reference';
   CFSTR_HTML               = 'HTML Format';
   CFSTR_RTF                = 'Rich Text Format';
   CFSTR_RTFNOOBJS          = 'Rich Text Format Without Objects';
@@ -126,21 +128,24 @@ type
 {$IFDEF VT_FMX}
   TDimension = Single;
   PDimension = ^Single;
+  TNodeHeight = Single;
   TVTCursor = TCursor;
   TVTDragDataObject = TDragObject;
   TVTBackground = TBitmap;
   TVTPaintContext = TCanvas;
   TVTBrush = TBrush;
 {$ELSE}
-  TDimension = Integer; // For Firemonkey support, see #841
+  TDimension = Integer; // Introduced for Firemonkey support, see #841
   PDimension = ^Integer;
+  TNodeHeight = NativeInt;
   TVTCursor = HCURSOR;
+  IDataObject= WinApi.ActiveX.IDataObject;
   TVTDragDataObject = IDataObject;
   TVTBackground = TPicture;
   TVTPaintContext = HDC;
   TVTBrush = HBRUSH;
 {$ENDIF}
-  TColumnIndex = type Integer;
+  TColumnIndex = Integer;
   TColumnPosition = type Cardinal;
   PCardinal = ^Cardinal;
 
@@ -332,7 +337,7 @@ type
     toAutoHideButtons,               // Node buttons are hidden when there are child nodes, but all are invisible.
     toAutoDeleteMovedNodes,          // Delete nodes which where moved in a drag operation (if not directed otherwise).
     toDisableAutoscrollOnFocus,      // Disable scrolling a node or column into view if it gets focused.
-    toAutoChangeScale,               // Change default node height automatically if the system's font scale is set to big fonts.
+    toAutoChangeScale,               // Change default node height and header height automatically according to the height of the used font.
     toAutoFreeOnCollapse,            // Frees any child node after a node has been collapsed (HasChildren flag stays there).
     toDisableAutoscrollOnEdit,       // Do not center a node horizontally when it is edited.
     toAutoBidiColumnOrdering         // When set then columns (if any exist) will be reordered from lowest index to highest index
@@ -405,6 +410,12 @@ type
     emVisibleDueToExpansion,         // Do not export nodes that are not visible because their parent is not expanded
     emSelected                       // export selected nodes only
     );
+
+  // Describes the type of text to return in the text and draw info retrival events.
+  TVSTTextType = (
+    ttNormal,      // normal label of the node, this is also the text which can be edited
+    ttStatic       // static (non-editable) text after the normal text
+  );
 
   // Options regarding strings (useful only for the string tree and descendants):
   TVTStringOption = (
@@ -635,14 +646,14 @@ type
     dtVCL
   );
 
-  // Determines the look of a tree's lines.
+  // Determines the look of a tree's lines that show the hierarchy
   TVTLineStyle = (
     lsCustomStyle,           // application provides a line pattern
     lsDotted,                // usual dotted lines (default)
     lsSolid                  // simple solid lines
   );
 
-  // TVTLineType is used during painting a tree
+  // TVTLineType is used during painting a tree for its tree lines that show the hierarchy
   TVTLineType = (
     ltNone,          // no line at all
     ltBottomRight,   // a line from bottom to the center and from there to the right
@@ -766,7 +777,7 @@ type
   end;
 
 const
-  DefaultPaintOptions     = [toShowButtons, toShowDropmark, toShowTreeLines, toShowRoot, toThemeAware, toUseBlendedImages];
+  DefaultPaintOptions     = [toShowButtons, toShowDropmark, toShowTreeLines, toShowRoot, toThemeAware, toUseBlendedImages, toFullVertGridLines];
   DefaultAnimationOptions = [];
   DefaultAutoOptions      = [toAutoDropExpand, toAutoTristateTracking, toAutoScrollOnExpand, toAutoDeleteMovedNodes, toAutoChangeScale, toAutoSort, toAutoHideButtons];
   DefaultSelectionOptions = [toSelectNextNodeOnRemoval];
@@ -880,32 +891,44 @@ type
   TVirtualNode = packed record
   private
     fIndex: Cardinal;         // index of node with regard to its parent
+    fChildCount: Cardinal;    // number of child nodes
+    fNodeHeight: TNodeHeight;  // height in pixels
   public
-    ChildCount: Cardinal;    // number of child nodes
-    NodeHeight: TDimension;  // height in pixels
     States: TVirtualNodeStates; // states describing various properties of the node (expanded, initialized etc.)
     Align: Byte;             // line/button alignment
     CheckState: TCheckState; // indicates the current check state (e.g. checked, pressed etc.)
     CheckType: TCheckType;   // indicates which check type shall be used for this node
     Dummy: Byte;             // dummy value to fill DWORD boundary
     TotalCount: Cardinal;    // sum of this node, all of its child nodes and their child nodes etc.
-    TotalHeight: TDimension; // height in pixels this node covers on screen including the height of all of its
-                             // children
+    TotalHeight: TNodeHeight;// height in pixels this node covers on screen including the height of all of its children.
     _Filler: TDWordFiller;   // Ensure 8 Byte alignment of following pointers for 64bit builds. Issue #1136
     // Note: Some copy routines require that all pointers (as well as the data area) in a node are
     //       located at the end of the node! Hence if you want to add new member fields (except pointers to internal
     //       data) then put them before field Parent.
   private
-    fParent:  PVirtualNode; // link to the node's last child...
-  public                  // reference to the node's parent (for the root this contains the treeview)
-    PrevSibling,             // link to the node's previous sibling or nil if it is the first node
-    NextSibling,             // link to the node's next sibling or nil if it is the last node
-    FirstChild,              // link to the node's first child...
-    LastChild: PVirtualNode; // link to the node's last child...
+    fParent:  PVirtualNode;     // reference to the node's parent (for the root this contains the treeview)
+    fPrevSibling: PVirtualNode; // link to the node's previous sibling or nil if it is the first node
+    fNextSibling: PVirtualNode; // link to the node's next sibling or nil if it is the last node
+  public // still public as it is used as var parameter in MergeSortAscending()
+    FirstChild: PVirtualNode;  // link to the node's first child...
+  private
+    fLastChild: PVirtualNode;   // link to the node's last child...
+  public
     procedure SetParent(const pParent: PVirtualNode); inline; //internal method, do not call directly but use Parent[Node] := x on tree control.
+    procedure SetPrevSibling(const pPrevSibling: PVirtualNode); inline; //internal method, do not call directly
+    procedure SetNextSibling(const pNextSibling: PVirtualNode); inline; //internal method, do not call directly
+    procedure SetFirstChild(const pFirstChild: PVirtualNode); inline; //internal method, do not call directly
+    procedure SetLastChild(const pLastChild: PVirtualNode); inline; //internal method, do not call directly
     procedure SetIndex(const pIndex: Cardinal); inline;       //internal method, do not call directly.
+    procedure SetChildCount(const pCount: Cardinal); inline; //internal method, do not call directly.
+    procedure SetNodeHeight(const pNodeHeight: TNodeHeight); inline; //internal method, do not call directly.
     property Index: Cardinal read fIndex;
+    property ChildCount: Cardinal read fChildCount;
     property Parent: PVirtualNode read fParent;
+    property PrevSibling: PVirtualNode read fPrevSibling;
+    property NextSibling: PVirtualNode read fNextSibling;
+    property LastChild: PVirtualNode read fLastChild;
+    property NodeHeight: TNodeHeight read fNodeHeight;
   private
     Data: record end;        // this is a placeholder, each node gets extra data determined by NodeDataSize
   public
@@ -1091,7 +1114,6 @@ implementation
 
 uses
   System.TypInfo,
-  VirtualTrees,
   VirtualTrees.StyleHooks,
   VirtualTrees.BaseTree,
   VirtualTrees.BaseAncestorVcl{to eliminate H2443 about inline expanding}
@@ -1133,6 +1155,11 @@ begin
   Exit(@Self <> nil);
 end;
 
+procedure TVirtualNode.SetNodeHeight(const pNodeHeight: TNodeHeight);
+begin
+  fNodeHeight := pNodeHeight;
+end;
+
 //----------------------------------------------------------------------------------------------------------------------
 
 procedure TVirtualNode.SetData(pUserData: Pointer);
@@ -1149,6 +1176,11 @@ begin
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
+
+procedure TVirtualNode.SetChildCount(const pCount: Cardinal);
+begin
+  fChildCount := pCount;
+end;
 
 procedure TVirtualNode.SetData(const pUserData: IInterface);
 
@@ -1173,6 +1205,16 @@ begin
   Include(Self.States, vsOnFreeNodeCallRequired);
 end;
 
+procedure TVirtualNode.SetFirstChild(const pFirstChild: PVirtualNode);
+begin
+  FirstChild := pFirstChild;
+end;
+
+procedure TVirtualNode.SetLastChild(const pLastChild: PVirtualNode);
+begin
+  fLastChild := pLastChild;
+end;
+
 procedure TVirtualNode.SetIndex(const pIndex: Cardinal);
 begin
   fIndex := pIndex;
@@ -1181,6 +1223,16 @@ end;
 procedure TVirtualNode.SetParent(const pParent: PVirtualNode);
 begin
   fParent := pParent;
+end;
+
+procedure TVirtualNode.SetPrevSibling(const pPrevSibling: PVirtualNode);
+begin
+  fPrevSibling := pPrevSibling;
+end;
+
+procedure TVirtualNode.SetNextSibling(const pNextSibling: PVirtualNode);
+begin
+  fNextSibling := pNextSibling;
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -1368,7 +1420,7 @@ begin
 
       if HandleAllocated then
       begin
-        if IsWinVistaOrAbove and ((tsUseThemes in TreeStates) or ((toThemeAware in ToBeSet) and StyleServices.Enabled)) and (toUseExplorerTheme in (ToBeSet + ToBeCleared)) and
+        if ((tsUseThemes in TreeStates) or ((toThemeAware in ToBeSet) and StyleServices.Enabled)) and (toUseExplorerTheme in (ToBeSet + ToBeCleared)) and
           not VclStyleEnabled then
         begin
           if (toUseExplorerTheme in ToBeSet) then
@@ -1584,49 +1636,65 @@ begin
     inherited;
 end;
 
-
+//----------------------------------------------------------------------------------------------------------------------
 
 { TCheckStateHelper }
 
-function TCheckStateHelper.IsDisabled : Boolean;
+function TCheckStateHelper.IsDisabled: Boolean;
 begin
   Result := Self >= TCheckState.csUncheckedDisabled;
 end;
 
-function TCheckStateHelper.IsChecked : Boolean;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.IsChecked: Boolean;
 begin
   Result := Self in [csCheckedNormal, csCheckedPressed, csCheckedDisabled];
 end;
 
-function TCheckStateHelper.IsUnChecked : Boolean;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.IsUnChecked: Boolean;
 begin
   Result := Self in [csUncheckedNormal, csUncheckedPressed, csUncheckedDisabled];
 end;
 
-function TCheckStateHelper.IsMixed : Boolean;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.IsMixed: Boolean;
 begin
   Result := Self in [csMixedNormal, csMixedPressed, csMixedDisabled];
 end;
 
-function TCheckStateHelper.GetEnabled : TCheckState;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.GetEnabled: TCheckState;
 begin
   Result := cEnabledState[Self];
 end;
 
-function TCheckStateHelper.GetPressed() : TCheckState;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.GetPressed(): TCheckState;
 begin
   Result := cPressedState[Self];
 end;
 
-function TCheckStateHelper.GetUnpressed() : TCheckState;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.GetUnpressed(): TCheckState;
 begin
   Result := cUnpressedState[Self];
 end;
 
-function TCheckStateHelper.GetToggled() : TCheckState;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TCheckStateHelper.GetToggled(): TCheckState;
 begin
   Result := cToggledState[Self];
 end;
+
+//----------------------------------------------------------------------------------------------------------------------
 
 { TSortDirectionHelper }
 

@@ -12,9 +12,12 @@ unit VirtualTrees.BaseAncestorFMX;
 
 interface
 uses
-    System.Classes, System.UITypes
-  , FMX.Objects, FMX.Graphics, FMX.StdCtrls
-  , VirtualTrees.Types, VirtualTrees.FMX;
+  {$IFDEF MSWINDOWS}
+  WinApi.Windows,
+  {$ENDIF}
+  System.Classes, System.UITypes,
+  FMX.Objects, FMX.Graphics, FMX.Controls, FMX.StdCtrls, FMX.Forms, FMX.ImgList,
+  VirtualTrees.Types, VirtualTrees.FMX;
 
 
 type
@@ -25,6 +28,7 @@ type
   private
     FDottedBrushTreeLines: TStrokeBrush;                  // used to paint dotted lines without special pens
     FDottedBrushGridLines: TStrokeBrush;                  // used to paint dotted lines without special pens
+    FInCreate: Boolean;
 
     function GetFillColor: TAlphaColor;
     procedure SetFillColor(const Value: TAlphaColor);
@@ -59,10 +63,19 @@ type
     procedure DragCanceled; virtual; abstract;
 
     procedure Resize; override;
+    function CreateSystemImageSet(): TImageList;
+    procedure SetWindowTheme(const Theme: string); virtual;
 
     procedure ChangeScale(M, D: Integer{$if CompilerVersion >= 31}; isDpiChange: Boolean{$ifend}); virtual; abstract;
     function GetControlsAlignment: TAlignment; virtual; abstract;
     function PrepareDottedBrush(CurrentDottedBrush: TBrush; Bits: Pointer; const BitsLinesCount: Word): TBrush; virtual; abstract;
+    function GetSelectedCount(): Integer; virtual; abstract;
+    procedure MarkCutCopyNodes; virtual; abstract;
+    function GetSortedCutCopySet(Resolve: Boolean): TNodeArray; virtual; abstract;
+    function GetSortedSelection(Resolve: Boolean): TNodeArray; virtual; abstract;
+    procedure WriteNode(Stream: TStream; Node: PVirtualNode);  virtual; abstract;
+    procedure DoMouseEnter(); reintroduce; overload; virtual; abstract;
+    procedure DoMouseLeave(); reintroduce; overload; virtual; abstract;
   protected //properties
     property DottedBrushTreeLines: TStrokeBrush read FDottedBrushTreeLines write FDottedBrushTreeLines;
     property DottedBrushGridLines: TStrokeBrush read FDottedBrushGridLines write FDottedBrushGridLines;
@@ -78,8 +91,8 @@ type
     function GetScrollInfo(Bar: Integer; var ScrollInfo: TScrollInfo): Boolean;
     function GetScrollPos(Bar: Integer): TDimension;
     function GetScrollBarForBar(Bar: Integer): TScrollBar;
-    procedure HScrollChangeProc(Sender: TObject);
-    procedure VScrollChangeProc(Sender: TObject);
+    procedure HScrollChangeProc(Sender: TObject); virtual; abstract;
+    procedure VScrollChangeProc(Sender: TObject); virtual; abstract;
 
     procedure CopyToClipboard; virtual; abstract;
     procedure CutToClipboard; virtual; abstract;
@@ -128,6 +141,7 @@ type
     /// Simulate Windows GetSystemMetrics
     /// </summary>
     function GetSystemMetrics(nIndex: Integer): Integer;
+    procedure Sort(Node: PVirtualNode; Column: TColumnIndex; Direction: TSortDirection; DoInit: Boolean = True); reintroduce; overload; virtual; abstract;																																					  
   public //properties
     property Font: TFont read FFont write SetFont;
     property ClientRect: TRect read GetClientRect;
@@ -174,20 +188,6 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorFMX.GetClientHeight: Single;
-begin
-  Result:= ClientRect.Height;
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
-function TVTBaseAncestorFMX.GetClientWidth: Single;
-begin
-  Result:= ClientRect.Width;
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
 function TVTBaseAncestorFMX.GetFillColor: TAlphaColor;
 begin
   Result:= Fill.Color;
@@ -195,62 +195,13 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorFMX.GetClientRect: TRect;
-begin
-  Result:= ClipRect;
-  if Assigned(FHeader) then
-    begin
-      if hoVisible in FHeader.FOptions then
-        Inc(Result.Top, FHeader.Height);
-    end;
-  if FVScrollBar.Visible then
-    Dec(Result.Right, FVScrollBar.Width);
-  if FHScrollBar.Visible then
-    Dec(Result.Bottom, FHScrollBar.Height);
-
-  if Result.Left>Result.Right then
-    Result.Left:= Result.Right;
-
-  if Result.Top>Result.Bottom then
-    Result.Top:= Result.Bottom;
-
-  //OffsetRect(Result, OffsetX, OffsetY);
-  //Dec(Result.Left, -OffsetX); //increase width
-  //Dec(Result.Top, -OffsetY);  //increase height
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
-procedure TVTBaseAncestorFMX.Resize;
-Var M: TWMSize;
-begin
-  inherited;
-
-  if FInCreate then
-    exit; //!!
-
-  M.Msg:= WM_SIZE;
-  M.SizeType:= SIZE_RESTORED;
-  M.Width:= Width;
-  M.Height:= Height;
-  M.Result:= 0;
-  WMSize(M);
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
 constructor TVTBaseAncestorFMX.Create(AOwner: TComponent);
 begin
+  FInCreate:= true;				   
   inherited;
 
   FHandleAllocated:= true;
   FUseRightToLeftAlignment:= false;
-  FBackgroundOffsetX:= 0;
-  FBackgroundOffsetY:= 0;
-  FMargin:= 4;
-  FTextMargin:= 4;
-  FDefaultNodeHeight:= 18; //???
-  FIndent:= 18; //???
   FBevelEdges:= [TBevelEdge.beLeft, TBevelEdge.beTop, TBevelEdge.beRight, TBevelEdge.beBottom];
   FBevelInner:= TBevelCut.bvRaised;
   FBevelOuter:= TBevelCut.bvLowered;
@@ -279,6 +230,8 @@ begin
   //FVScrollBar.Margins.Bottom:= FVScrollBar.Width;
 
   SetAcceptsControls(false);
+
+  FInCreate:= false;					
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -369,7 +322,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorVcl.InvalidateRect(lpRect: PRect; bErase: BOOL): BOOL;
+function TVTBaseAncestorFMX.InvalidateRect(lpRect: PRect; bErase: Boolean): Boolean;
 begin
   Repaint;
   Result:= true;
@@ -377,7 +330,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorVcl.UpdateWindow(): BOOL;
+function TVTBaseAncestorFMX.UpdateWindow(): Boolean;
 begin
   Repaint;
   Result:= true;
@@ -385,7 +338,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function RedrawWindow(lprcUpdate: PRect; hrgnUpdate: NativeUInt; flags: UINT): BOOL;
+function TVTBaseAncestorFMX.RedrawWindow(lprcUpdate: PRect; hrgnUpdate: NativeUInt; flags: UINT): Boolean;
 begin
   Repaint;
   Result:= true;
@@ -393,7 +346,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function RedrawWindow(const lprcUpdate: TRect; hrgnUpdate: NativeUInt; flags: UINT): BOOL;
+function TVTBaseAncestorFMX.RedrawWindow(const lprcUpdate: TRect; hrgnUpdate: NativeUInt; flags: UINT): Boolean;
 begin
   Repaint;
   Result:= true;
@@ -496,36 +449,6 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-procedure TVTBaseAncestorFMX.HScrollChangeProc(Sender: TObject);
-Var M: TWMHScroll;
-begin
-  M.Msg:= WM_HSCROLL;
-  M.ScrollCode:= SB_THUMBPOSITION;
-  M.Pos:= GetScrollPos(SB_HORZ);
-  M.ScrollBar:= SB_HORZ;
-  M.Result:= 0;
-
-  WMHScroll(M);
-  Repaint;
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
-procedure TVTBaseAncestorFMX.VScrollChangeProc(Sender: TObject);
-Var M: TWMHScroll;
-begin
-  M.Msg:= WM_VSCROLL;
-  M.ScrollCode:= SB_THUMBPOSITION;
-  M.Pos:= GetScrollPos(SB_VERT);
-  M.ScrollBar:= SB_VERT;
-  M.Result:= 0;
-
-  WMVScroll(M);
-  Repaint;
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
 procedure TVTBaseAncestorFMX.SetBiDiMode(Value: TBiDiMode);
 begin
   if FBiDiMode <> Value then
@@ -562,7 +485,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorFMX.Focused(): Boolean
+function TVTBaseAncestorFMX.Focused(): Boolean;
 begin
   Result:= IsFocused;
 end;
@@ -576,7 +499,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function TVTBaseAncestorFMX.SendWM_SETREDRAW(Updating: Boolean): NativeUInt; inline;
+function TVTBaseAncestorFMX.SendWM_SETREDRAW(Updating: Boolean): NativeUInt;
 begin
   Repaint;
   Result:= 0;
@@ -586,7 +509,7 @@ end;
 
 function TVTBaseAncestorFMX.GetSystemMetrics(nIndex: Integer): Integer;
 begin
-  {$IFNDEF MSWINDOWS}
+  {$IFDEF MSWINDOWS}
   Result:= GetSystemMetrics(nIndex);
   {$ELSE}
   case nIndex of
@@ -596,6 +519,35 @@ begin
       raise Exception.Create('Unknown code for GetSystemMetrics: ' + IntToStr(nIndex));
   end;
   {$ENDIF}
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+function TVTBaseAncestorFMX.CreateSystemImageSet(): TImageList;
+begin
+  Result:= TImageList.Create(Self);
+  FillSystemCheckImages(Self, Result);
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+procedure TVTBaseAncestorFMX.SetWindowTheme(const Theme: string);
+begin
+  //nothing
+end;
+//----------------------------------------------------------------------------------------------------------------------
+
+function TVTBaseAncestorFMX.CreateSystemImageSet(): TImageList;
+begin
+  Result:= TImageList.Create(Self);
+  FillSystemCheckImages(Self, Result);
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+procedure TVTBaseAncestorFMX.SetWindowTheme(const Theme: string);
+begin
+  //nothing
 end;
 
 end.
