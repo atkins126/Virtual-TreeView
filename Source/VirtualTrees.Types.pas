@@ -145,7 +145,7 @@ type
   TVTPaintContext = HDC;
   TVTBrush = HBRUSH;
 {$ENDIF}
-  TColumnIndex = Integer;
+  TColumnIndex = {$if CompilerVersion < 36} type {$endif} Integer; // See issue #1276
   TColumnPosition = type Cardinal;
   PCardinal = ^Cardinal;
 
@@ -160,6 +160,23 @@ type
   // OLE drag'n drop support
   TFormatEtcArray = array of TFormatEtc;
   TFormatArray = array of Word;
+
+  // See issue #1270.
+  // Taken from: https://learn.microsoft.com/en-us/windows/win32/menurc/about-cursors
+  // To be used with: LoadCursor(0, MAKEINTRESOURCE(TPanningCursor.MoveAll))
+  TPanningCursor = (
+    MoveAll = 32654,
+    MoveNS = 32652,
+    MoveEW = 32653,
+    MoveN = 32655,
+    MoveNE = 32660,
+    MoveE = 32658,
+    MoveSE = 32662,
+    MoveS = 32656,
+    MoveSW = 32661,
+    MoveW = 32657,
+    MoveNW = 32659
+  );
 
   TSmartAutoFitType = (
     smaAllColumns,       // consider nodes in view only for all columns
@@ -520,8 +537,7 @@ type
     tsVCLDragging,            // VCL drag'n drop in progress.
     tsVCLDragPending,         // One-shot flag to avoid clearing the current selection on implicit mouse up for VCL drag.
     tsVCLDragFinished,        // Flag to avoid triggering the OnColumnClick event twice
-    tsWheelPanning,           // Wheel mouse panning is active or soon will be.
-    tsWheelScrolling,         // Wheel mouse scrolling is active or soon will be.
+    tsPanning,                // Mouse panning is active.
     tsWindowCreating,         // Set during window handle creation to avoid frequent unnecessary updates.
     tsUseExplorerTheme        // The tree runs under WinVista+ and is using the explorer theme
   );
@@ -708,7 +724,7 @@ type
   TVTButtonFillMode = (
     fmTreeColor,             // solid color, uses the tree's background color
     fmWindowColor,           // solid color, uses clWindow
-    fmShaded,                // color gradient, Windows XP style (legacy code, use toThemeAware on Windows XP instead)
+    fmShaded,                // no longer supported, use toThemeAware for Windows XP and later instead
     fmTransparent            // transparent color, use the item's background color
   );
 

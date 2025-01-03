@@ -326,6 +326,8 @@ type
                                           const APlusSelectedHotBM :TBitmap; const AMinusBM : TBitmap; const AMinusHotBM : TBitmap;
                                           const AMinusSelectedHotBM :TBitmap; var ASize : TSize) of object;
 
+  TVTColumnHeaderSpanningEvent = procedure(Sender: TVTHeader; Column: TColumnIndex; var Count: Integer) of object;
+
   // search, sort
   TVTCompareEvent = procedure(Sender: TBaseVirtualTree; Node1, Node2: PVirtualNode; Column: TColumnIndex;
     var Result: Integer) of object;
@@ -546,9 +548,8 @@ type
     FSearchStart: TVTSearchStart;                // Where to start iteration on each key press.
 
     // miscellanous
-    FPanningWindow: HWND;                        // Helper window for wheel panning
+    FPanningWindow: TForm;                       // Helper window for wheel panning
     FPanningCursor: TVTCursor;                   // Current wheel panning cursor.
-    FPanningImage: TBitmap;                      // A little 32x32 bitmap to indicate the panning reference point.
     FLastClickPos: TPoint;                       // Used for retained drag start and wheel mouse scrolling.
     FOperationCount: Cardinal;                   // Counts how many nested long-running operations are in progress.
     FOperationCanceled: Boolean;                 // Used to indicate that a long-running operation should be canceled.
@@ -681,6 +682,7 @@ type
                                                  // not covered by any node
     FOnMeasureItem: TVTMeasureItemEvent;         // Triggered when a node is about to be drawn and its height was not yet
                                                  // determined by the application.
+    FOnColumnHeaderSpanning: TVTColumnHeaderSpanningEvent; // triggered before the header column area been create for painting
     FOnGetUserClipboardFormats: TVTGetUserClipboardFormatsEvent; // gives application/descendants the opportunity to
                                                  // add own clipboard formats on the fly
     FOnPaintText: TVTPaintText;                  // triggered before either normal or fixed text is painted to allow
@@ -1056,6 +1058,7 @@ type
     procedure DoStructureChange(Node: PVirtualNode; Reason: TChangeReason); virtual;
     procedure DoTimerScroll; virtual;
     procedure DoUpdating(State: TVTUpdateState); virtual;
+    procedure DoColumnHeaderSpanning(Column: TColumnIndex; var Count: Integer); virtual;
     function DoValidateCache: Boolean; virtual;
     procedure DragAndDrop(AllowedEffects: DWord; const DataObject: TVTDragDataObject; var DragEffect: Integer); virtual;
     procedure DragCanceled; override;
@@ -1116,6 +1119,7 @@ type
     procedure InternalRemoveFromSelection(Node: PVirtualNode); virtual;
     procedure InterruptValidation(pWaitForValidationTermination: Boolean = True);
     procedure InvalidateCache;
+    function LineWidth(): TDimension;
     procedure Loaded; override;
     procedure MainColumnChanged; virtual;
     procedure MarkCutCopyNodes; override;
@@ -1130,7 +1134,6 @@ type
     procedure PaintTreeLines(const PaintInfo: TVTPaintInfo; IndentSize: TDimension; const LineImage: TLineImage); virtual;
     procedure PaintSelectionRectangle(Target: TCanvas; WindowOrgX: TDimension; const SelectionRect: TRect;
       TargetRect: TRect); virtual;
-    procedure PanningWindowProc(var Message: TMessage); virtual;
     procedure PrepareBitmaps(NeedButtons, NeedLines: Boolean);
     procedure PrepareCell(var PaintInfo: TVTPaintInfo; WindowOrgX, MaxWidth: TDimension); virtual;
     function ReadChunk(Stream: TStream; Version: Integer; Node: PVirtualNode; ChunkType,
@@ -1376,6 +1379,7 @@ type
     property OnStateChange: TVTStateChangeEvent read FOnStateChange write FOnStateChange;
     property OnStructureChange: TVTStructureChangeEvent read FOnStructureChange write FOnStructureChange;
     property OnUpdating: TVTUpdatingEvent read FOnUpdating write FOnUpdating;
+    property OnColumnHeaderSpanning: TVTColumnHeaderSpanningEvent read FOnColumnHeaderSpanning write FOnColumnHeaderSpanning;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -1504,6 +1508,7 @@ type
       var Text: string); virtual;
     function GetTreeRect: TRect;
     function GetVisibleParent(Node: PVirtualNode; IncludeFiltered: Boolean = False): PVirtualNode;
+    function GetTopInvisibleParent(Node: PVirtualNode): PVirtualNode;
     function HasAsParent(Node, PotentialParent: PVirtualNode): Boolean;
     function InsertNode(Node: PVirtualNode; Mode: TVTNodeAttachMode; UserData: Pointer = nil): PVirtualNode;
     procedure InvalidateChildren(Node: PVirtualNode; Recursive: Boolean);
@@ -1639,14 +1644,14 @@ function TreeFromNode(Node: PVirtualNode): TBaseVirtualTree;
 
 implementation
 
-{$R VirtualTrees.res}
-
 uses
   Winapi.MMSystem,             // for animation timer (does not include further resources)
   System.Math,
   System.SyncObjs,
   System.StrUtils,
+  Clipbrd,
   Vcl.Consts,
+  Vcl.ExtCtrls,
   Vcl.AxCtrls,                 // TOLEStream
   Vcl.StdActns,                // for standard action support
   Vcl.GraphUtil,               // accessibility helper class
@@ -4123,8 +4128,6 @@ begin
                               MoveTo(2, Width div 2);
                               LineTo(Width - 2, Width div 2);
                             end
-                              else
-                                FMinusBM.Handle := LoadBitmap(HInstance, 'VT_XPBUTTONMINUS');
                           end;
                       FHotMinusBM.Canvas.Draw(0, 0, FMinusBM);
                       FSelectedHotMinusBM.Canvas.Draw(0, 0, FMinusBM);
@@ -4165,8 +4168,6 @@ begin
                               MoveTo(Width div 2, 2);
                               LineTo(Width div 2, Width - 2);
                             end
-                              else
-                                FPlusBM.Handle := LoadBitmap(HInstance, 'VT_XPBUTTONPLUS');
                           end;
                        FHotPlusBM.Canvas.Draw(0, 0, FPlusBM);
                        FSelectedHotPlusBM.Canvas.Draw(0, 0, FPlusBM);
@@ -4354,7 +4355,10 @@ procedure TBaseVirtualTree.SetButtonFillMode(const Value: TVTButtonFillMode);
 begin
   if FButtonFillMode <> Value then
   begin
-    FButtonFillMode := Value;
+    if Value = TVTButtonFillMode.fmShaded then // no longer supported
+      FButtonFillMode := TVTButtonFillMode.fmTreeColor
+    else
+      FButtonFillMode := Value;
     if not (csLoading in ComponentState) then
     begin
       PrepareBitmaps(True, False);
@@ -6183,7 +6187,7 @@ begin
     FHintData.Tree.FLastHintRect := Rect(0, 0, 0, 0);
 
   LeaveStates := [tsHint];
-  if [tsWheelPanning, tsWheelScrolling] * FStates = [] then
+  if not (tsPanning in FStates) then
   begin
     StopTimer(ScrollTimer);
     LeaveStates := LeaveStates + [tsScrollPending, tsScrolling];
@@ -7471,7 +7475,7 @@ begin
     inherited;
 
     // Start wheel panning or scrolling if not already active, allowed and scrolling is useful at all.
-    if (toWheelPanning in FOptions.MiscOptions) and ([tsWheelScrolling, tsWheelPanning] * FStates = []) and
+    if (toWheelPanning in FOptions.MiscOptions) and not (tsPanning in FStates) and
       ((FRangeX > ClientWidth) or (FRangeY > ClientHeight)) then
     begin
       FLastClickPos := SmallPointToPoint(Message.Pos);
@@ -7501,16 +7505,7 @@ var
 begin
   DoStateChange([], [tsMiddleButtonDown]);
 
-  // If wheel panning/scrolling is active and the mouse has not yet been moved then the user starts wheel auto scrolling.
-  // Indicate this by removing the panning flag. Otherwise (the mouse has moved meanwhile) stop panning.
-  if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
-  begin
-    if tsWheelScrolling in FStates then
-      DoStateChange([], [tsWheelPanning])
-    else
-      StopWheelPanning;
-  end
-  else
+  if not (tsPanning in FStates) then
     if FHeader.States = [] then
     begin
       inherited;
@@ -7783,8 +7778,7 @@ begin
   begin
     // Feature: design-time header #415
     // Allow header to handle cursor and return control's default if it did nothing
-    if (CursorWnd = Handle) and
-      ([tsWheelPanning, tsWheelScrolling] * FStates = []) then
+    if (CursorWnd = Handle) and not (tsPanning in FStates) then
     begin
       if not TVTHeaderCracker(FHeader).HandleMessage(TMessage(Message)) then
       begin
@@ -8078,8 +8072,8 @@ procedure TBaseVirtualTree.AdjustPanningCursor(X, Y: TDimension);
 // Loads the proper cursor which indicates into which direction scrolling is done.
 
 var
-  Name: string;
-  NewCursor: HCURSOR;
+  NewCursor: TPanningCursor;
+  NewCursorHandle: HCURSOR;
   ScrollHorizontal,
   ScrollVertical: Boolean;
 
@@ -8093,12 +8087,12 @@ begin
     if ScrollHorizontal then
     begin
       if ScrollVertical then
-        Name := 'VT_MOVEALL'
+        NewCursor := TPanningCursor.MOVEALL
       else
-        Name := 'VT_MOVEEW';
+        NewCursor := TPanningCursor.MOVEEW;
     end
     else
-      Name := 'VT_MOVENS';
+      NewCursor := TPanningCursor.MOVENS;
   end
   else
   begin
@@ -8111,32 +8105,33 @@ begin
       begin
         // Left hand side.
         if Y - FLastClickPos.Y < -8 then
-          Name := 'VT_MOVENW'
+          NewCursor := TPanningCursor.MOVENW
         else
           if Y - FLastClickPos.Y > 8 then
-            Name := 'VT_MOVESW'
+            NewCursor := TPanningCursor.MOVESW
           else
-            Name := 'VT_MOVEW';
+            NewCursor := TPanningCursor.MOVEW;
       end
       else
         if X - FLastClickPos.X > 8 then
         begin
           // Right hand side.
           if Y - FLastClickPos.Y < -8 then
-            Name := 'VT_MOVENE'
+            NewCursor := TPanningCursor.MOVENE
+
           else
             if Y - FLastClickPos.Y > 8 then
-              Name := 'VT_MOVESE'
+              NewCursor := TPanningCursor.MOVESE
             else
-              Name := 'VT_MOVEE';
+              NewCursor := TPanningCursor.MOVEE;
         end
         else
         begin
           // Up or down.
           if Y < FLastClickPos.Y then
-            Name := 'VT_MOVEN'
+            NewCursor := TPanningCursor.MOVEN
           else
-            Name := 'VT_MOVES';
+            NewCursor := TPanningCursor.MOVES;
         end;
     end
     else
@@ -8144,30 +8139,30 @@ begin
       begin
         // Only horizontal movement allowed.
         if X < FLastClickPos.X then
-          Name := 'VT_MOVEW'
+          NewCursor := TPanningCursor.MOVEW
         else
-          Name := 'VT_MOVEE';
+          NewCursor := TPanningCursor.MOVEE;
       end
       else
       begin
         // Only vertical movement allowed.
         if Y < FLastClickPos.Y then
-          Name := 'VT_MOVEN'
+          NewCursor := TPanningCursor.MOVEN
         else
-          Name := 'VT_MOVES';
+          NewCursor := TPanningCursor.MOVES;
       end;
   end;
 
   // Now load the cursor and apply it.
-  NewCursor := LoadCursor(HInstance, PChar(Name));
-  if FPanningCursor <> NewCursor then
+  NewCursorHandle := LoadCursor(0, MAKEINTRESOURCE(NewCursor));
+  if FPanningCursor <> NewCursorHandle then
   begin
     DeleteObject(FPanningCursor);
-    FPanningCursor := NewCursor;
+    FPanningCursor := NewCursorHandle;
     Winapi.Windows.SetCursor(FPanningCursor);
   end
   else
-    DeleteObject(NewCursor);
+    DeleteObject(NewCursorHandle);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -8359,7 +8354,7 @@ begin
   // wheel panning/scrolling is active.
   IsDropTarget := Assigned(FDragManager) and DragManager.IsDropTarget;
   IsDrawSelecting := [tsDrawSelPending, tsDrawSelecting] * FStates <> [];
-  IsWheelPanning := [tsWheelPanning, tsWheelScrolling] * FStates <> [];
+  IsWheelPanning := tsPanning in FStates;
   Result := ((toAutoScroll in FOptions.AutoOptions) or IsWheelPanning) and
     (FHeader.States = []) and (IsDrawSelecting or IsDropTarget or (tsVCLDragging in FStates) or IsWheelPanning);
 end;
@@ -9290,7 +9285,7 @@ begin
   if CanAutoScroll then
   begin
     // Calculation for wheel panning/scrolling is a bit different to normal auto scroll.
-    if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
+    if tsPanning in FStates then
     begin
       if (X - FLastClickPos.X) < -8 then
         Include(Result, TScrollDirection.sdLeft);
@@ -9393,7 +9388,7 @@ procedure TBaseVirtualTree.DoAutoScroll(X, Y: TDimension);
 begin
   FScrollDirections := DetermineScrollDirections(X, Y);
 
-  if FStates * [tsWheelPanning, tsWheelScrolling] = [] then
+  if  not (tsPanning in FStates) then
   begin
     if FScrollDirections = [] then
     begin
@@ -9677,6 +9672,14 @@ procedure TBaseVirtualTree.DoColumnDblClick(Column: TColumnIndex; Shift: TShiftS
 begin
   if Assigned(FOnColumnDblClick) then
     FOnColumnDblClick(Self, Column, Shift);
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+procedure TBaseVirtualTree.DoColumnHeaderSpanning(Column: TColumnIndex; var Count: Integer);
+begin
+  if Assigned(FOnColumnHeaderSpanning) then
+    FOnColumnHeaderSpanning(Self.Header, Column, Count);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -10899,7 +10902,7 @@ begin
   MapWindowPoints(Handle, 0, R, 2);
   InRect := PtInRect(R, P);
   ClientP := ScreenToClient(P);
-  Panning := [tsWheelPanning, tsWheelScrolling] * FStates <> [];
+  Panning := tsPanning in FStates;
 
   if IsMouseSelecting or InRect or Panning then
   begin
@@ -10996,7 +10999,7 @@ begin
     end;
     UpdateWindow();
 
-    if (FScrollDirections = []) and ([tsWheelPanning, tsWheelScrolling] * FStates = []) then
+    if (FScrollDirections = []) and not (tsPanning in FStates) then
     begin
       StopTimer(ScrollTimer);
       DoStateChange([], [tsScrollPending, tsScrolling]);
@@ -11489,7 +11492,7 @@ procedure TBaseVirtualTree.DrawGridHLine(const PaintInfo: TVTPaintInfo; Left, Ri
 var
   R: TRect;
 begin
-  R := Rect(Min(Left, Right), Top, Max(Left, Right) + 1, Top + 1);
+  R := Rect(Min(Left, Right), Top, Max(Left, Right) + LineWidth, Top + LineWidth);
   DrawGridLine(PaintInfo.Canvas, R)
 end;
 
@@ -11501,7 +11504,7 @@ procedure TBaseVirtualTree.DrawGridVLine(const PaintInfo: TVTPaintInfo; Top, Bot
 var
   R: TRect;
 begin
-  R := Rect(Left, Min(Top, Bottom), Left + 1, Max(Top, Bottom) + 1);
+  R := Rect(Left, Min(Top, Bottom), Left + LineWidth, Max(Top, Bottom) + LineWidth);
   if pFixedColumn and (TVtPaintOption.toShowVertGridLines in TreeOptions.PaintOptions) then // In case we showe grid lines, we must use a color for the fixed column that differentiates from the normal gridlines
     StyleServices.DrawElement(PaintInfo.Canvas.Handle, StyleServices.GetElementDetails(tlGroupHeaderLineOpenHot), R {$IF CompilerVersion  >= 34}, @R, CurrentPPI{$IFEND})
   else begin
@@ -12402,7 +12405,7 @@ var
   //--------------- end local functions ---------------------------------------
 
 begin
-  if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
+  if tsPanning in FStates then
   begin
     StopWheelPanning;
     Exit;
@@ -13605,14 +13608,6 @@ begin
       end;
     end;
 
-    // If both wheel panning and auto scrolling are pending then the user moved the mouse while holding down the
-    // middle mouse button. This means panning is being used, hence remove the wheel scroll flag.
-    if [tsWheelPanning, tsWheelScrolling] * FStates = [tsWheelPanning, tsWheelScrolling] then
-    begin
-      if ((Abs(FLastClickPos.X - X) >= Mouse.DragThreshold) or (Abs(FLastClickPos.Y - Y) >= Mouse.DragThreshold)) then
-        DoStateChange([], [tsWheelScrolling]);
-    end;
-
     // Really start dragging if the mouse has been moved more than the threshold.
     if (tsOLEDragPending in FStates) and
       (
@@ -13625,7 +13620,7 @@ begin
     begin
       if CanAutoScroll then
         DoAutoScroll(X, Y);
-      if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
+      if tsPanning in FStates then
         AdjustPanningCursor(X, Y);
       if not IsMouseSelecting then
       begin
@@ -13836,6 +13831,7 @@ var
   Details, lSizeDetails: TThemedElementDetails;
   lSize: TSize;
   Theme: HTHEME;
+  lCheckImages: TCustomImageList;
 begin
   with ImageInfo do
   begin
@@ -13907,8 +13903,12 @@ begin
         DrawArrow(Canvas, TScrollDirection.sdDown, Point(R.Left + Round(lSize.cx * 0.22), R.Top + Round(lSize.cy * 0.33)), Round(lSize.cx *0.28));
       end;//if
     end
-    else
-      with FCheckImages do
+    else begin
+      if Assigned(FCheckImages) then
+        lCheckImages := FCheckImages
+      else
+        lCheckImages := FCustomCheckImages;
+      with lCheckImages do
       begin
         if Selected and not Ghosted then
         begin
@@ -13923,6 +13923,7 @@ begin
           ImageList_DrawEx(Handle, Index, Canvas.Handle, XPos, YPos, 0, 0, GetRGBColor(BkColor), ForegroundColor,
             ILD_TRANSPARENT);
       end;
+    end; //else
   end;
 end;
 
@@ -14192,34 +14193,6 @@ begin
       Target.FrameRect(SelectionRect);
     end;
   end;
-end;
-
-//----------------------------------------------------------------------------------------------------------------------
-
-procedure TBaseVirtualTree.PanningWindowProc(var Message: TMessage);
-
-var
-  PS: TPaintStruct;
-  Canvas: TCanvas;
-
-begin
-  if Message.Msg = WM_PAINT then
-  begin
-    BeginPaint(FPanningWindow, PS);
-    Canvas := TCanvas.Create;
-    Canvas.Handle := PS.hdc;
-    try
-      Canvas.Draw(0, 0, FPanningImage);
-    finally
-      Canvas.Handle := 0;
-      Canvas.Free;
-      EndPaint(FPanningWindow, PS);
-    end;
-    Message.Result := 0;
-  end
-  else
-    with Message do
-      Result := DefWindowProc(FPanningWindow, Msg, wParam, lParam);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -14830,123 +14803,72 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-var
-  PanningWindowClass: TWndClass = (
-    style: 0;
-    lpfnWndProc: @DefWindowProc;
-    cbClsExtra: 0;
-    cbWndExtra: 0;
-    hInstance: 0;
-    hIcon: 0;
-    hCursor: 0;
-    hbrBackground: 0;
-    lpszMenuName: nil;
-    lpszClassName: 'VTPanningWindow'
-  );
-
 procedure TBaseVirtualTree.StartWheelPanning(Position: TPoint);
 
 // Called when wheel panning should start. A little helper window is created to indicate the reference position,
 // which determines in which direction and how far wheel panning/scrolling will happen.
 
   //--------------- local function --------------------------------------------
-
-  function CreateClipRegion: HRGN;
-
-  // In order to avoid doing all the transparent drawing ourselves we use a
-  // window region for the wheel window.
-  // Since we only work on a very small image (32x32 pixels) this is acceptable.
-
+  function CreatePanningWindow(const ImageName: TPanningCursor; const Pos: TPoint): TForm;
   var
-    Start, X, Y: Integer;
-    Temp: HRGN;
-
+    Form: TForm;
+    Image: TImage;
+    PanningImage: TIcon;
   begin
-    Assert(not FPanningImage.Empty, 'Invalid wheel panning image.');
+    Form := TForm.Create(Self);
+    Form.PopupMode := pmExplicit;
+    Form.PopupParent := GetParentForm(Self);
+    Form.TransparentColor := True;
+    Form.TransparentColorValue := clBtnFace;
+    Form.Width := ScaledPixels(32);
+    Form.Height := Form.Width;
+    Form.BorderStyle := bsNone;
+    Form.StyleElements := [];
+    Image := TImage.Create(Form);
+    Image.Left := 0;
+    Image.Top := 0;
+    Image.Parent := Form;
+    Image.Align := TAlign.alClient;
 
-    // Create an initial region on which we operate.
-    Result := CreateRectRgn(0, 0, 0, 0);
-    with FPanningImage, Canvas do
-    begin
-      for Y := 0 to Height - 1 do
-      begin
-        Start := -1;
-        for X := 0 to Width - 1 do
-        begin
-          // Start a new span if we found a non-transparent pixel and no span is currently started.
-          if (Start = -1) and (Pixels[X, Y] <> clFuchsia) then
-            Start := X
-          else
-            if (Start > -1) and (Pixels[X, Y] = clFuchsia) then
-            begin
-              // A non-transparent span is finished. Add it to the result region.
-              Temp := CreateRectRgn(Start, Y, X, Y + 1);
-              CombineRgn(Result, Result, Temp, RGN_OR);
-              DeleteObject(Temp);
-              Start := -1;
-            end;
-        end;
-        // If there is an open span then add this also to the result region.
-        if Start > -1 then
-        begin
-          Temp := CreateRectRgn(Start, Y, Width, Y + 1);
-          CombineRgn(Result, Result, Temp, RGN_OR);
-          DeleteObject(Temp);
-        end;
-      end;
+    PanningImage := TIcon.Create;
+    try
+      PanningImage.Handle := LoadImage(0, MAKEINTRESOURCE(ImageName), IMAGE_CURSOR, Form.Width, Form.Height, LR_DEFAULTCOLOR or LR_LOADTRANSPARENT);
+      Image.Picture.Assign(PanningImage);
+    finally
+      PanningImage.Free;
     end;
-    // The resulting region is used as window region so we must not delete it.
-    // Windows will own it after the assignment below.
+    Form.Left := Pos.X - (PanningImage.Width div 2);
+    Form.Top := Pos.Y - (PanningImage.Height div 2);
+    Form.Position := poDesigned;
+    // This prevents a focus chnage compare to using TForm.Show()
+    ShowWindow(Form.Handle, SW_SHOWNOACTIVATE);
+    Form.Visible := True;
+    Exit(Form);
   end;
-
   //--------------- end local function ----------------------------------------
 
 var
-  TempClass: TWndClass;
-  ClassRegistered: Boolean;
-  ImageName: string;
+  ImageName: TPanningCursor;
   Pt: TPoint;
 
 begin
-  // Set both panning and scrolling flag. One will be removed shortly depending on whether the middle mouse button is
-  // released before the mouse is moved or vice versa. The first case is referred to as wheel scrolling while the
-  // latter is called wheel panning.
   StopTimer(ScrollTimer);
-  DoStateChange([tsWheelPanning, tsWheelScrolling]);
+  DoStateChange([tsPanning]);
 
-  // Register the helper window class.
-  PanningWindowClass.hInstance := HInstance;
-  ClassRegistered := GetClassInfo(HInstance, PanningWindowClass.lpszClassName, TempClass);
-  if not ClassRegistered or (TempClass.lpfnWndProc <> @DefWindowProc) then
-  begin
-    if ClassRegistered then
-      Winapi.Windows.UnregisterClass(PanningWindowClass.lpszClassName, HInstance);
-    Winapi.Windows.RegisterClass(PanningWindowClass);
-  end;
-  // Create the helper window and show it at the given position without activating it.
-  Pt := ClientToScreen(Position);
-  FPanningWindow := CreateWindowEx(WS_EX_TOOLWINDOW, PanningWindowClass.lpszClassName, nil, WS_POPUP, Pt.X - 16, Pt.Y - 16,
-    32, 32, Handle, 0, HInstance, nil);
-
-  FPanningImage := TBitmap.Create;
+  // Determine correct cursor
   if FRangeX > ClientWidth then
   begin
     if FRangeY > ClientHeight then
-      ImageName := 'VT_MOVEALL'
+      ImageName := TPanningCursor.MOVEALL
     else
-      ImageName := 'VT_MOVEEW';
+      ImageName := TPanningCursor.MOVEEW;
   end
   else
-    ImageName := 'VT_MOVENS';
-  FPanningImage.LoadFromResourceName(HInstance, ImageName);
-  SetWindowRgn(FPanningWindow, CreateClipRegion, False);
+    ImageName := TPanningCursor.MOVENS;
 
-  {$ifdef CPUX64}
-  SetWindowLongPtr(FPanningWindow, GWLP_WNDPROC, LONG_PTR(System.Classes.MakeObjectInstance(PanningWindowProc)));
-  {$else}
-  SetWindowLong(FPanningWindow, GWL_WNDPROC, NativeInt(System.Classes.MakeObjectInstance(PanningWindowProc)));
-  {$endif CPUX64}
-  ShowWindow(FPanningWindow, SW_SHOWNOACTIVATE);
+  // Create the helper window and show it at the given position without activating it.
+  Pt := ClientToScreen(Position);
+  FPanningWindow := CreatePanningWindow(ImageName, Pt);
 
   // Setup the panscroll timer and capture all mouse input.
   TrySetFocus();
@@ -14960,29 +14882,17 @@ procedure TBaseVirtualTree.StopWheelPanning;
 
 // Stops panning if currently active and destroys the helper window.
 
-var
-  Instance: Pointer;
-
 begin
-  if [tsWheelPanning, tsWheelScrolling] * FStates <> [] then
+  if tsPanning in FStates then
   begin
     // Release the mouse capture and stop the panscroll timer.
     StopTimer(ScrollTimer);
     ReleaseCapture;
-    DoStateChange([], [tsWheelPanning, tsWheelScrolling]);
+    DoStateChange([], [tsPanning]);
 
     // Destroy the helper window.
-    {$ifdef CPUX64}
-    Instance := Pointer(GetWindowLongPtr(FPanningWindow, GWLP_WNDPROC));
-    {$else}
-    Instance := Pointer(GetWindowLong(FPanningWindow, GWL_WNDPROC));
-    {$endif CPUX64}
-    DestroyWindow(FPanningWindow);
-    if Instance <> @DefWindowProc then
-      System.Classes.FreeObjectInstance(Instance);
-    FPanningWindow := 0;
-    FPanningImage.Free;
-    FPanningImage := nil;
+    if Assigned(FPanningWindow) then
+      FPanningWindow.Release;
     DeleteObject(FPanningCursor);
     FPanningCursor := 0;
     Winapi.Windows.SetCursor(Screen.Cursors[Cursor]);
@@ -16390,6 +16300,8 @@ var
   I: Integer;
   LevelChange: Boolean;
 begin
+  if Length(pNodes) = 0 then
+    exit; // Prevent range error below when empty array is passen. See issue #1288
   BeginUpdate;
   try
     for I := High(pNodes) downto 1 do
@@ -17651,25 +17563,73 @@ function TBaseVirtualTree.GetLastVisibleNoInit(Node: PVirtualNode = nil;
   ConsiderChildrenAbove: Boolean = True; IncludeFiltered: Boolean = False): PVirtualNode;
 
 // Returns the very last visible node in the tree while optionally considering toChildrenAbove.
+// Note that the visibility of all ancestor nodes of the resulting node must not be considered.
 // No initialization is performed.
+
+  //--------------- local functions -------------------------------------------
+
+  function GetNodeIsVisible(ChildNode: PVirtualNode): Boolean;
+  begin
+    Result := (vsVisible in ChildNode.States) and
+              (IncludeFiltered or not IsEffectivelyFiltered[ChildNode]);
+  end;
+
+  function GetNodeHasVisibleChildren(ChildNode: PVirtualNode): Boolean;
+  begin
+    Result := (vsHasChildren in ChildNode.States) and
+              (vsExpanded in ChildNode.States) and
+              not (vsAllChildrenHidden in ChildNode.States);
+  end;
+
+  function IterateChildren(ParentNode: PVirtualNode): PVirtualNode;
+  var
+    Run: PVirtualNode;
+  begin
+    Result := nil;
+
+    Run := GetLastChildNoInit(ParentNode); // Do not use 'GetLastVisibleChildNoInit' here (see above).
+    while Assigned(Run) do
+    begin
+      if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+      begin
+        if GetNodeIsVisible(Run) then
+          Result := Run
+        else if GetNodeHasVisibleChildren(Run) then
+          Result := IterateChildren(Run);
+      end else
+      begin
+        if GetNodeHasVisibleChildren(Run) then
+          Result := IterateChildren(Run)
+        else if GetNodeIsVisible(Run) then
+          Result := Run;
+      end;
+
+      if Assigned(Result) then
+        break;
+
+      Run := GetPreviousSiblingNoInit(Run);
+    end;
+  end;
+
+  //--------------- end local functions ---------------------------------------
+
 var
-  Next: PVirtualNode;
+  Run: PVirtualNode;
 
 begin
-  Result := GetLastVisibleChildNoInit(Node, IncludeFiltered);
-  if not ConsiderChildrenAbove or not (toChildrenAbove in FOptions.PaintOptions) then
-    while Assigned(Result) and (vsExpanded in Result.States) do
-    begin
-      // Test if there is a next last child. If not keep the node from the last run.
-      // Otherwise use the next last child.
-      Next := GetLastChildNoInit(Result);
-      if Assigned(Next) and (not (vsVisible in Next.States) or
-         (not IncludeFiltered and IsEffectivelyFiltered[Next])) then
-        Next := GetPreviousVisibleSiblingNoInit(Next, IncludeFiltered);
-      if Next = nil then
-        Break;
-      Result := Next;
-    end;
+  Result := nil;
+
+  // First, check wether the given node and all its parents are expanded.
+  // If not, there can not be any visible child node.
+  Run := Node;
+  while Assigned(Run) and (Run <> RootNode) do
+  begin
+    if not (vsExpanded in Run.States) then
+      exit;
+    Run := Run.Parent;
+  end;
+
+  Result := IterateChildren(Node);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -18102,113 +18062,122 @@ function TBaseVirtualTree.GetNextVisible(Node: PVirtualNode; ConsiderChildrenAbo
 // toChildrenAbove is optionally considered which is the default here.
 
 var
+  TopInvisibleParent: PVirtualNode;
   ForceSearch: Boolean;
 
 begin
   Result := Node;
-  if Assigned(Result) then
-  begin
-    Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+  if not Assigned(Result) then Exit;
 
-    repeat
-      // If the given node is not visible then look for a parent node which is visible, otherwise we will
-      // likely go unnecessarily through a whole bunch of invisible nodes.
-      if not FullyVisible[Result] then
-        Result := GetVisibleParent(Result, True);
+  Assert(Result <> FRoot, 'Node must not be the hidden root node.');
 
-      if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+  repeat
+    // If any ancestor is invisible, then find the last (furthest) parent node
+    // which is invisible to skip invisible subtrees. Otherwise we will
+    // likely go unnecessarily through a whole bunch of invisible nodes.
+    TopInvisibleParent := GetTopInvisibleParent(Result);
+    if Assigned(TopInvisibleParent) then
+      Result := TopInvisibleParent;
+
+    if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+    begin
+      repeat
+        // If there a no siblings anymore, go up one level.
+        if not Assigned(Result.NextSibling) then
+        begin
+          Result := Result.Parent;
+          if Result = FRoot then
+          begin
+            Result := nil;
+            Break;
+          end;
+
+          if not (vsInitialized in Result.States) then
+            InitNode(Result);
+        end
+        else
+        begin
+          // There is at least one sibling so take it.
+          Result := Result.NextSibling;
+          if not (vsInitialized in Result.States) then
+            InitNode(Result);
+          if not (vsVisible in Result.States) then
+            Continue;
+
+          // Now take a look at the children. As the children are initialized
+          // while toggling, we don't need to call 'InitChildren' beforehand here.
+          while (vsExpanded in Result.States) and Assigned(Result.FirstChild) do
+          begin
+            Result := Result.FirstChild;
+            if not (vsInitialized in Result.States) then
+              InitNode(Result);
+            if not (vsVisible in Result.States) then
+              Break;
+          end;
+        end;
+
+        // If we found a visible node we don't need to search any longer.
+        // As it has already been initialized above, we don't need to call 'InitNode' here.
+        if vsVisible in Result.States then
+          Break;
+      until False;
+    end
+    else
+    begin
+      ForceSearch := True;
+      // If we found an invisible ancestor, we must not check its children.
+      // Remember, that TopInvisibleParent can be effectively invisible merely due to
+      // its own parent's expansion state despite being visible itself.
+      if Result <> TopInvisibleParent then
+      begin
+        if not (vsInitialized in Result.States) then
+          InitNode(Result);
+
+        // Child nodes are the first choice if the current node is known to be visible.
+        if (vsVisible in Result.States) and (vsExpanded in Result.States) then
+        begin
+          // Initialize the node's children if necessary.
+          if (vsHasChildren in Result.States) and (Result.ChildCount = 0) then
+              InitChildren(Result);
+
+          if Assigned(Result.FirstChild) then
+          begin
+            Result := Result.FirstChild;
+            if not (vsInitialized in Result.States) then
+              InitNode(Result);
+            ForceSearch := False;
+          end;
+        end;
+      end;
+
+      // If there are no children or the first child is not visible then search the sibling nodes or traverse parents.
+      if ForceSearch or not (vsVisible in Result.States) then
       begin
         repeat
-          // If there a no siblings anymore, go up one level.
-          if not Assigned(Result.NextSibling) then
+          // Is there a next sibling?
+          if Assigned(Result.NextSibling) then
           begin
-            Result := Result.Parent;
-            if Result = FRoot then
-            begin
-              Result := nil;
-              Break;
-            end;
-
+            Result := Result.NextSibling;
             if not (vsInitialized in Result.States) then
               InitNode(Result);
             if vsVisible in Result.States then
               Break;
           end
+          // No sibling anymore, so use the parent's next sibling.
+          else if Result.Parent <> FRoot then
+            Result := Result.Parent
           else
           begin
-            // There is at least one sibling so take it.
-            Result := Result.NextSibling;
-            if not (vsInitialized in Result.States) then
-              InitNode(Result);
-            if not (vsVisible in Result.States) then
-              Continue;
-
-            // Now take a look at the children.
-            // As the children are initialized while toggling, we don't need to do this here.
-            while (vsExpanded in Result.States) and Assigned(Result.FirstChild) do
-            begin
-              Result := Result.FirstChild;
-              if not (vsInitialized in Result.States) then
-                InitNode(Result);
-              if not (vsVisible in Result.States) then
-                Break;
-            end;
-
-            // If we found a visible node we don't need to search any longer.
-            if vsVisible in Result.States then
-              Break;
+            // There are no further nodes to examine, hence there is no further visible node.
+            Result := nil;
+            Break;
           end;
         until False;
-      end
-      else
-      begin
-        // Has this node got children?
-        if [vsHasChildren, vsExpanded] * Result.States = [vsHasChildren, vsExpanded] then
-        begin
-          // Yes, there are child nodes. Initialize them if necessary.
-          if Result.ChildCount = 0 then
-            InitChildren(Result);
-        end;
-
-        // Child nodes are the first choice if possible.
-        if (vsExpanded in Result.States) and Assigned(Result.FirstChild) then
-        begin
-          Result := GetFirstChild(Result);
-          ForceSearch := False;
-        end
-        else
-          ForceSearch := True;
-
-        // If there are no children or the first child is not visible then search the sibling nodes or traverse parents.
-        if Assigned(Result) and (ForceSearch or not (vsVisible in Result.States)) then
-        begin
-          repeat
-            // Is there a next sibling?
-            if Assigned(Result.NextSibling) then
-            begin
-              Result := Result.NextSibling;
-              if not (vsInitialized in Result.States) then
-                InitNode(Result);
-              if vsVisible in Result.States then
-                Break;
-            end
-            else
-            begin
-              // No sibling anymore, so use the parent's next sibling.
-              if Result.Parent <> FRoot then
-                Result := Result.Parent
-              else
-              begin
-                // There are no further nodes to examine, hence there is no further visible node.
-                Result := nil;
-                Break;
-              end;
-            end;
-          until False;
-        end;
       end;
-    until not Assigned(Result) or IsEffectivelyVisible[Result];
-  end;
+    end;
+  until not Assigned(Result) or IsEffectivelyVisible[Result];
+
+  Assert(Result <> Node, 'Node cannot be its own visible successor.');
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -18216,98 +18185,100 @@ end;
 function TBaseVirtualTree.GetNextVisibleNoInit(Node: PVirtualNode; ConsiderChildrenAbove: Boolean = True): PVirtualNode;
 
 // Returns the next node in tree, with regard to Node, which is visible.
-// toChildrenAbove is optionally considered (which is the default). No initialization is done.
+// No initialization is done.
+// toChildrenAbove is optionally considered which is the default here.
 
 var
+  TopInvisibleParent: PVirtualNode;
   ForceSearch: Boolean;
 
 begin
   Result := Node;
-  if Assigned(Result) then
-  begin
-    Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+  if not Assigned(Result) then Exit;
 
-    repeat
-      if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+  Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+
+  repeat
+    // If any ancestor is invisible, then find the last (furthest) parent node
+    // which is invisible to skip invisible subtrees. Otherwise we will
+    // likely go unnecessarily through a whole bunch of invisible nodes.
+    TopInvisibleParent := GetTopInvisibleParent(Result);
+    if Assigned(TopInvisibleParent) then
+      Result := TopInvisibleParent;
+
+    if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+    begin
+      repeat
+        // If there are no siblings anymore, go up one level.
+        if not Assigned(Result.NextSibling) then
+        begin
+          Result := Result.Parent;
+          if Result = FRoot then
+          begin
+            Result := nil;
+            Break;
+          end;
+        end
+        else
+        begin
+          // There is at least one sibling so take it.
+          Result := Result.NextSibling;
+          if not (vsVisible in Result.States) then
+            Continue;
+
+          // Now take a look at the children.
+          while (vsExpanded in Result.States) and Assigned(Result.FirstChild) do
+          begin
+            Result := Result.FirstChild;
+            if not (vsVisible in Result.States) then
+              Break;
+          end;
+        end;
+
+        // If we found a visible node we don't need to search any longer.
+        if vsVisible in Result.States then
+          Break;
+      until False;
+    end
+    else
+    begin
+      // Child nodes are the first choice if the current node is known to be visible.
+      // Remember, that TopInvisibleParent can be effectively invisible merely due to
+      // its own parent's expansion state despite being visible itself.
+      if (vsVisible in Result.States) and (vsExpanded in Result.States) and
+         (Result <> TopInvisibleParent) and Assigned(Result.FirstChild) then
+      begin
+        Result := Result.FirstChild;
+        ForceSearch := False;
+      end else
+        ForceSearch := True;
+
+      // If there are no children or the first child is not visible then search the sibling nodes or traverse parents.
+      if ForceSearch or not (vsVisible in Result.States) then
       begin
         repeat
-          // If there a no siblings anymore, go up one level.
-          if not Assigned(Result.NextSibling) then
+          // Is there a next sibling?
+          if Assigned(Result.NextSibling) then
           begin
-            Result := Result.Parent;
-            if Result = FRoot then
-            begin
-              Result := nil;
-              Break;
-            end;
+            Result := Result.NextSibling;
             if vsVisible in Result.States then
               Break;
           end
+          // No sibling anymore, so use the parent's next sibling.
+          else if Result.Parent <> FRoot then
+            Result := Result.Parent
           else
           begin
-            // There is at least one sibling so take it.
-            Result := Result.NextSibling;
-            if not (vsVisible in Result.States) then
-              Continue;
-
-            // Now take a look at the children.
-            while (vsExpanded in Result.States) and Assigned(Result.FirstChild) do
-            begin
-              Result := Result.FirstChild;
-              if not (vsVisible in Result.States) then
-                Break;
-            end;
-
-            // If we found a visible node we don't need to search any longer.
-            if vsVisible in Result.States then
-              Break;
+            // There are no further nodes to examine, hence there is no further visible node.
+            Result := nil;
+            Break;
           end;
         until False;
-      end
-      else
-      begin
-        // If the given node is not visible then look for a parent node which is visible, otherwise we will
-        // likely go unnecessarily through a whole bunch of invisible nodes.
-        if not FullyVisible[Result] then
-          Result := GetVisibleParent(Result, True);
-
-        // Child nodes are the first choice if possible.
-        if (vsExpanded in Result.States) and Assigned(Result.FirstChild) then
-        begin
-          Result := Result.FirstChild;
-          ForceSearch := False;
-        end
-        else
-          ForceSearch := True;
-
-        // If there are no children or the first child is not visible then search the sibling nodes or traverse parents.
-        if ForceSearch or not (vsVisible in Result.States) then
-        begin
-          repeat
-            // Is there a next sibling?
-            if Assigned(Result.NextSibling) then
-            begin
-              Result := Result.NextSibling;
-              if vsVisible in Result.States then
-                Break;
-            end
-            else
-            begin
-              // No sibling anymore, so use the parent's next sibling.
-              if Result.Parent <> FRoot then
-                Result := Result.Parent
-              else
-              begin
-                // There are no further nodes to examine, hence there is no further visible node.
-                Result := nil;
-                Break;
-              end;
-            end;
-          until False;
-        end;
       end;
-    until not Assigned(Result) or IsEffectivelyVisible[Result];
-  end;
+    end;
+  until not Assigned(Result) or IsEffectivelyVisible[Result];
+
+  Assert(Result <> Node, 'Node cannot be its own visible successor.');
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -18852,104 +18823,120 @@ function TBaseVirtualTree.GetPreviousVisible(Node: PVirtualNode; ConsiderChildre
 // toChildrenAbove is optionally considered which is the default here.
 
 var
-  Marker: PVirtualNode;
+  TopInvisibleParent: PVirtualNode;
+  ForceSearch: Boolean;
 
 begin
   Result := Node;
-  if Assigned(Result) then
-  begin
-    Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+  if not Assigned(Result) then Exit;
 
-    repeat
-      // If the given node is not visible then look for a parent node which is visible and use its last visible
-      // child or the parent node (if there is no visible child) as result.
-      if not FullyVisible[Result] then
+  Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+
+  repeat
+    // If any ancestor is invisible, then find the last (furthest) parent node
+    // which is invisible to skip invisible subtrees. Otherwise we will
+    // likely go unnecessarily through a whole bunch of invisible nodes.
+    TopInvisibleParent := GetTopInvisibleParent(Result);
+    if Assigned(TopInvisibleParent) then
+      Result := TopInvisibleParent;
+
+    if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+    begin
+      ForceSearch := True;
+      // If we found an invisible ancestor, we must not check its children.
+      // Remember, that TopInvisibleParent can be effectively invisible merely due to
+      // its own parent's expansion state despite being visible itself.
+      if Result <> TopInvisibleParent then
       begin
-        Result := GetVisibleParent(Result, True);
-        if Result = FRoot then
-          Result := nil;
-        Marker := GetLastVisible(Result, True);
-        if Assigned(Marker) then
-          Result := Marker;
-      end
-      else
+        if not (vsInitialized in Result.States) then
+          InitNode(Result);
+
+        if (vsVisible in Result.States) and (vsExpanded in Result.States) then
+        begin
+          // Initialiue the node's children if necessary.
+          if (vsHasChildren in Result.States) and (Result.ChildCount = 0) then
+            InitChildren(Result);
+
+          // Child nodes are the first choice if the current node is known to be visible.
+          if Assigned(Result.LastChild) then
+          begin
+            Result := Result.LastChild;
+            if not (vsInitialized in Result.States) then
+              InitNode(Result);
+            ForceSearch := False;
+          end;
+        end;
+      end;
+
+      if ForceSearch or not (vsVisible in Result.States) then
       begin
-        if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
-        begin
-          repeat
-            if Assigned(Result.LastChild) and (vsExpanded in Result.States) then
-            begin
-              Result := Result.LastChild;
-              if not (vsInitialized in Result.States) then
-                InitNode(Result);
-
-              if vsVisible in Result.States then
-                Break;
-            end
-            else
-              if Assigned(Result.PrevSibling) then
-              begin
-                if not (vsInitialized in Result.PrevSibling.States) then
-                  InitNode(Result.PrevSibling);
-
-                if vsVisible in Result.PrevSibling.States then
-                begin
-                  Result := Result.PrevSibling;
-                  Break;
-                end;
-              end
-              else
-              begin
-                Marker := nil;
-                repeat
-                  Result := Result.Parent;
-                  if Result <> FRoot then
-                    Marker := GetPreviousVisibleSibling(Result, True)
-                  else
-                    Result := nil;
-                until Assigned(Marker) or (Result = nil);
-                if Assigned(Marker) then
-                  Result := Marker;
-
-                Break;
-              end;
-          until False;
-        end
-        else
-        begin
-          repeat
-            // Is there a previous sibling node?
-            if Assigned(Result.PrevSibling) then
-            begin
-              Result := Result.PrevSibling;
-              // Initialize the new node and check its visibility.
-              if not (vsInitialized in Result.States) then
-                InitNode(Result);
-              if vsVisible in Result.States then
-              begin
-                // If there are visible child nodes then use the last one.
-                Marker := GetLastVisible(Result, True, True);
-                if Assigned(Marker) then
-                  Result := Marker;
-                Break;
-              end;
-            end
-            else
-            begin
-              // No previous sibling there so the parent node is the nearest previous node.
-              Result := Result.Parent;
-              if Result = FRoot then
-                Result := nil;
+        repeat
+          // Is there a previous sibling?
+          if Assigned(Result.PrevSibling) then
+          begin
+            Result := Result.PrevSibling;
+            if not (vsInitialized in Result.States) then
+              InitNode(Result);
+            if vsVisible in Result.States then
               Break;
-            end;
-          until False;
+          end
+          // No sibling anymore, so use the parent's previous sibling.
+          else if Result.Parent <> FRoot then
+            Result := Result.Parent
+          // There are no further nodes to examine, hence there is no further visible node.
+          else
+          begin
+            Result := nil;
+            Break;
+          end;
+        until False;
+      end;
+    end
+    else
+    begin
+      repeat
+        // If there are no sibling anymore, go up one level.
+        if not Assigned(Result.PrevSibling) then
+        begin
+          Result := Result.Parent;
+          if Result = FRoot then
+          begin
+            Result := nil;
+            Break;
+          end;
+          if not (vsInitialized in Result.States) then
+            InitNode(Result);
+        end else
+        begin
+          Result := Result.PrevSibling;
+          if not (vsInitialized in Result.States) then
+            InitNode(Result);
+          if not (vsVisible in Result.States) then
+            Continue;
+
+          // Now take a look at the children. As the children are initialized
+          // while toggling, we don't need to call 'InitChildren' beforehand here.
+          while (vsExpanded in Result.States) and Assigned(Result.LastChild) do
+          begin
+            Result := Result.LastChild;
+            if not (vsInitialized in Result.States) then
+              InitNode(Result);
+            if not (vsVisible in Result.States) then
+              Break;
+          end;
         end;
 
-        if Assigned(Result) and not (vsInitialized in Result.States) then
-          InitNode(Result);
-      end;
-    until not Assigned(Result) or IsEffectivelyVisible[Result];
-  end;
+        // If we found a visible node we don't need to search any longer.
+        if vsVisible in Result.States then
+          Break;
+      until False;
+    end;
+
+    if Assigned(Result) and not (vsInitialized in Result.States) then
+      InitNode(Result);
+  until not Assigned(Result) or IsEffectivelyVisible[Result];
+
+  Assert(Result <> Node, 'Node cannot be its own visible predecessor.');
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -18958,97 +18945,99 @@ function TBaseVirtualTree.GetPreviousVisibleNoInit(Node: PVirtualNode;
   ConsiderChildrenAbove: Boolean = True): PVirtualNode;
 
 // Returns the previous node in tree, with regard to Node, which is visible.
+// No initialization is done.
 // toChildrenAbove is optionally considered which is the default here.
 
 var
-  Marker: PVirtualNode;
+  TopInvisibleParent: PVirtualNode;
+  ForceSearch: Boolean;
 
 begin
   Result := Node;
-  if Assigned(Result) then
-  begin
-    Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+  if not Assigned(Result) then Exit;
 
-    repeat
-      // If the given node is not visible then look for a parent node which is visible and use its last visible
-      // child or the parent node (if there is no visible child) as result.
-      if not FullyVisible[Result] then
+  Assert(Result <> FRoot, 'Node must not be the hidden root node.');
+
+  repeat
+    // If any ancestor is invisible, then find the last (furthest) parent node
+    // which is invisible to skip invisible subtrees. Otherwise we will
+    // likely go unnecessarily through a whole bunch of invisible nodes.
+    TopInvisibleParent := GetTopInvisibleParent(Result);
+    if Assigned(TopInvisibleParent) then
+      Result := TopInvisibleParent;
+
+    if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+    begin
+      // Child nodes are the first choice if the current node is known to be visible.
+      // Remember, that TopInvisibleParent can be effectively invisible merely due to
+      // its own parent's expansion state despite being visible itself.
+      if (vsVisible in Result.States) and (vsExpanded in Result.States) and
+         (Result <> TopInvisibleParent) and Assigned(Result.LastChild) then
       begin
-        Result := GetVisibleParent(Result, True);
-        if Result = FRoot then
-          Result := nil;
-        Marker := GetLastVisibleNoInit(Result, True);
-        if Assigned(Marker) then
-          Result := Marker;
-      end
-      else
+        Result := Result.LastChild;
+        ForceSearch := False;
+      end else
+        ForceSearch := True;
+
+      if ForceSearch or not (vsVisible in Result.States) then
       begin
-        if ConsiderChildrenAbove and (toChildrenAbove in FOptions.PaintOptions) then
+        repeat
+          // Is there a previous sibling?
+          if Assigned(Result.PrevSibling) then
+          begin
+            Result := Result.PrevSibling;
+            if vsVisible in Result.States then
+              Break;
+          end
+          // No sibling anymore, so use the parent's previous sibling.
+          else if Result.Parent <> FRoot then
+            Result := Result.Parent
+          // There are no further nodes to examine, hence there is no further visible node.
+          else
+          begin
+            Result := nil;
+            Break;
+          end;
+        until False;
+      end;
+    end
+    else
+    begin
+      repeat
+        // If there are no siblings anymore, go up one level.
+        if not Assigned(Result.PrevSibling) then
         begin
-          repeat
-            // Is the current node expanded and has children?
-            if (vsExpanded in Result.States) and Assigned(Result.LastChild) then
-            begin
-              Result := Result.LastChild;
-              if vsVisible in Result.States then
-                Break;
-            end
-            else
-              if Assigned(Result.PrevSibling) then
-              begin
-                // No children anymore, so take the previous sibling.
-                Result := Result.PrevSibling;
-                if vsVisible in Result.States then
-                  Break;
-              end
-              else
-              begin
-                // No children and no previous siblings, so walk up the tree and look wether
-                // a parent has a previous visible sibling. If that is the case take it,
-                // otherwise there is no previous visible node.
-                Marker := nil;
-                repeat
-                  Result := Result.Parent;
-                  if Result <> FRoot then
-                    Marker := GetPreviousVisibleSiblingNoInit(Result, True)
-                  else
-                    Result := nil;
-                until Assigned(Marker) or (Result = nil);
-                if Assigned(Marker) then
-                  Result := Marker;
-                Break;
-              end;
-          until False;
+          Result := Result.Parent;
+          if Result = FRoot then
+          begin
+            Result := nil;
+            Break;
+          end;
         end
         else
         begin
-          repeat
-            // Is there a previous sibling node?
-            if Assigned(Result.PrevSibling) then
-            begin
-              Result := Result.PrevSibling;
-              if vsVisible in Result.States then
-              begin
-                // If there are visible child nodes then use the last one.
-                Marker := GetLastVisibleNoInit(Result, True, True);
-                if Assigned(Marker) then
-                  Result := Marker;
-                Break;
-              end;
-            end
-            else
-            begin
-              // No previous sibling there so the parent node is the nearest previous node.
-              Result := Result.Parent;
-              if Result = FRoot then
-                Result := nil;
+          // There is at least one sibling so take it.
+          Result := Result.PrevSibling;
+          if not (vsVisible in Result.States) then
+            Continue;
+
+          // Now take a look at the children.
+          while (vsExpanded in Result.States) and Assigned(Result.LastChild) do
+          begin
+            Result := Result.LastChild;
+            if not (vsVisible in Result.States) then
               Break;
-            end;
-          until False;
+          end;
         end;
-      end;
-    until not Assigned(Result) or IsEffectivelyVisible[Result];
-  end;
+
+        // If we found a visible node we don't need to search any longer.
+        if vsVisible in Result.States then
+          Break;
+      until False;
+    end;
+  until not Assigned(Result) or IsEffectivelyVisible[Result];
+
+  Assert(Result <> Node, 'Node cannot be its own visible predecessor.');
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -19175,6 +19164,20 @@ begin
   Result.FMode := vneLevel;
   Result.FTree := Self;
   Result.FNodeLevel := NodeLevel;
+end;
+
+function TBaseVirtualTree.LineWidth: TDimension;
+// Returns the width in pixels that should be used to draw grid lines, see issue #1203
+begin
+  // Always use line width of 1 for older Delphi versions.
+  {$if CompilerVersion < 31}
+  Exit(1);
+  {$else}
+  if FCurrentPPI < 200 then
+    Exit(1) // Always use 1 pixel is scaled <=200%
+  else
+    Exit(MulDiv(1, Self.FCurrentPPI, 132)); // Use 132 dpi instead of the typical 96 so that line width increase slightly slower than the actual scaling, so we have a 3px line at 400%
+  {$ifend}
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -19449,6 +19452,31 @@ begin
   Result := Node.Parent;
   while (Result <> FRoot) and (not FullyVisible[Result] or (not IncludeFiltered and IsEffectivelyFiltered[Result])) do
     Result := Result.Parent;
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+function TBaseVirtualTree.GetTopInvisibleParent(Node: PVirtualNode): PVirtualNode;
+
+// Returns the last (furthest) parent node of Node which is invisible.
+
+var
+  Run: PVirtualNode;
+
+begin
+  Assert(Assigned(Node), 'Node must not be nil.');
+  Assert(Node <> FRoot, 'Node must not be the hidden root node.');
+
+  Result := nil;
+
+  Run := Node.Parent;
+  while (Run <> FRoot) do
+  begin
+    if not ( (vsVisible in Run.States) and (vsExpanded in Run.Parent.States) ) then
+      Result := Run;
+    Run := Run.Parent;
+  end;
+
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -20495,15 +20523,15 @@ begin
                             begin
                               if BidiMode = bdLeftToRight then
                               begin
-                                DrawGridHLine(PaintInfo, CellRect.Left + PaintInfo.Offsets[ofsCheckBox] - fImagesMargin, CellRect.Right - 1, CellRect.Bottom - 1);
+                                DrawGridHLine(PaintInfo, CellRect.Left + PaintInfo.Offsets[ofsCheckBox] - fImagesMargin, CellRect.Right - LineWidth, CellRect.Bottom - LineWidth);
                               end
                               else
                               begin
-                                DrawGridHLine(PaintInfo, CellRect.Left, CellRect.Right - IfThen(toFixedIndent in FOptions.PaintOptions, 1, IndentSize) * FIndent - 1, CellRect.Bottom - 1);
+                                DrawGridHLine(PaintInfo, CellRect.Left, CellRect.Right - IfThen(toFixedIndent in FOptions.PaintOptions, LineWidth, IndentSize) * FIndent - 1, CellRect.Bottom - LineWidth);
                               end;
                             end
                             else
-                              DrawGridHLine(PaintInfo, CellRect.Left, CellRect.Right, CellRect.Bottom - 1);
+                              DrawGridHLine(PaintInfo, CellRect.Left, CellRect.Right, CellRect.Bottom - LineWidth);
 
                             Dec(CellRect.Bottom);
                             Dec(ContentRect.Bottom);
@@ -20533,7 +20561,7 @@ begin
                                 begin
                                   if (BidiMode = bdLeftToRight) or not ColumnIsEmpty(Node, Column) then
                                   begin
-                                    DrawGridVLine(PaintInfo, CellRect.Top, CellRect.Bottom, CellRect.Right - 1, ColumnIsFixed and (NextColumn >= 0));
+                                    DrawGridVLine(PaintInfo, CellRect.Top, CellRect.Bottom, CellRect.Right - LineWidth, ColumnIsFixed and (NextColumn >= 0));
                                   end;
 
                                   Dec(CellRect.Right);
@@ -20549,7 +20577,7 @@ begin
                                 begin
                                   if (BidiMode = bdLeftToRight) or not ColumnIsEmpty(Node, Column) then
                                   begin
-                                    DrawGridVLine(PaintInfo, CellRect.Top, CellRect.Bottom, CellRect.Right - 1, ColumnIsFixed and (NextColumn >= 0));
+                                    DrawGridVLine(PaintInfo, CellRect.Top, CellRect.Bottom, CellRect.Right - LineWidth, ColumnIsFixed and (NextColumn >= 0));
                                   end;
                                   Dec(CellRect.Right);
                                 end;
@@ -20847,13 +20875,6 @@ begin
   begin
     lDragImage := TVTDragImage.Create(Self);
     try
-      with lDragImage do
-      begin
-        Fade := True;
-        PreBlendBias := 0;
-        Transparency := 200;
-      end;
-
       // Determine the drag rectangle which is a square around the hot spot. Operate in virtual tree space.
       LocalSpot := HotSpot;
       Dec(LocalSpot.X, -FEffectiveOffsetX);
@@ -20898,8 +20919,7 @@ begin
         HotSpot.X := Width div 2;
         HotSpot.Y := Height div 2;
 
-        lDragImage.ColorKey := FColors.BackGroundColor;
-        lDragImage.PrepareDrag(Image, HotSpot, DataObject);
+        lDragImage.PrepareDrag(Image, HotSpot, DataObject, FColors.BackGroundColor);
       finally
         Image.Free;
       end;
