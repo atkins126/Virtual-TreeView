@@ -7545,7 +7545,7 @@ begin
   StopTimer(ChangeTimer);
   StopTimer(StructureChangeTimer);
 
-  if not (csDesigning in ComponentState) and (toAcceptOLEDrop in FOptions.MiscOptions) and HandleAllocated then
+  if not (csDesigning in ComponentState) and HandleAllocated then
     RevokeDragDrop(Handle);
 
   inherited;
@@ -8729,9 +8729,8 @@ begin
   PrepareBitmaps(True, True);
 
   // Register tree as OLE drop target.
-  if not (csDesigning in ComponentState) and (toAcceptOLEDrop in FOptions.MiscOptions) then
-    if not (csLoading in ComponentState) then // will be done in Loaded after all inherited settings are loaded from the DFMs
-      RegisterDragDrop(Handle, DragManager as IDropTarget);
+  if not (csDesigning in ComponentState) and not (csLoading in ComponentState) then // will be done in Loaded after all inherited settings are loaded from the DFMs
+    RegisterDragDrop(Handle, DragManager as IDropTarget);
 
   UpdateScrollBars(True);
   UpdateHeaderRect;
@@ -11222,6 +11221,12 @@ var
 
 begin
   try
+    if not (toAcceptOLEDrop in TreeOptions.MiscOptions) then
+    begin
+      Effect := DROPEFFECT_NONE;
+      Exit(NOERROR);
+    end;
+
     // Determine acceptance of drag operation and reset scroll start time.
     FDragScrollStart := 0;
 
@@ -12583,8 +12588,6 @@ begin
   if not FSelectionLocked and ((not (IsAnyHit or FullRowDrag) and MultiSelect and ShiftEmpty) or
     (IsAnyHit and (not NodeSelected or (NodeSelected and CanClear)) and (ShiftEmpty or not MultiSelect or (tsRightButtonDown in FStates)))) then
   begin
-    Assert(not (tsClearPending in FStates), 'Pending and direct clearance are mutual exclusive!');
-
     // If the currently hit node was already selected then we have to reselect it again after clearing the current
     // selection, but without a change event if it is the only selected node.
     // The same applies if the Alt key is pressed, which allows to start drawing the selection rectangle also
@@ -13486,9 +13489,8 @@ begin
   inherited;
 
   // Call RegisterDragDrop after all visual inheritance changes to MiscOptions have been applied.
-  if not (csDesigning in ComponentState) and (toAcceptOLEDrop in FOptions.MiscOptions) then
-    if HandleAllocated then
-      RegisterDragDrop(Handle, DragManager as IDropTarget);
+  if not (csDesigning in ComponentState) and HandleAllocated then
+    RegisterDragDrop(Handle, DragManager as IDropTarget);
 
   // If a root node count has been set during load of the tree then update its child structure now
   // as this hasn't been done yet in this case.
